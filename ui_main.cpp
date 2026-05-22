@@ -222,9 +222,26 @@ void ui_main_c::Init(int argc, char** argv)
 	// Find paths
 	scriptName = std::filesystem::u8path(argv[0]);
 	if (scriptName.is_relative()) {
-		scriptName = sys->basePath / scriptName;
+#if __APPLE__ && __MACH__
+		// Dev launches pass ./src/Launch.lua from the PoB repo root; basePath is runtime-macos/.
+		auto fromCwd = std::filesystem::current_path() / scriptName;
+		if (std::filesystem::exists(fromCwd)) {
+			scriptName = fromCwd;
+		} else
+#endif
+		{
+			scriptName = sys->basePath / scriptName;
+		}
 	}
-	scriptName = canonical(scriptName);
+	{
+		std::error_code ec;
+		auto resolved = std::filesystem::weakly_canonical(scriptName, ec);
+		if (ec) {
+			sys->Error("Script path error for '%s': %s",
+				scriptName.generic_u8string().c_str(), ec.message().c_str());
+		}
+		scriptName = resolved;
+	}
 
 	scriptCfg = scriptName;
 	scriptCfg.replace_extension(".cfg");
