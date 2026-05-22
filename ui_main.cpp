@@ -223,10 +223,10 @@ void ui_main_c::Init(int argc, char** argv)
 	scriptName = std::filesystem::u8path(argv[0]);
 	if (scriptName.is_relative()) {
 #if __APPLE__ && __MACH__
-		// Dev launches pass ./src/Launch.lua from the PoB repo root; basePath is runtime-macos/.
-		auto fromCwd = std::filesystem::current_path() / scriptName;
-		if (std::filesystem::exists(fromCwd)) {
-			scriptName = fromCwd;
+		// SetWorkDir() runs before Init; resolve scripts from the original launch directory.
+		auto fromLaunch = sys->launchCwd / scriptName;
+		if (std::filesystem::exists(fromLaunch)) {
+			scriptName = fromLaunch;
 		} else
 #endif
 		{

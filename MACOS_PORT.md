@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — script loads; SIGBUS during run)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2

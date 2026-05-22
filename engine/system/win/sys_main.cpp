@@ -663,6 +663,7 @@ bool sys_main_c::Run(int argc, char** argv)
 	errorRaised = false;
 	baseTime = std::chrono::system_clock::now();
 
+	launchCwd = std::filesystem::current_path();
 	SetWorkDir();
 
 	// Get system interfaces
