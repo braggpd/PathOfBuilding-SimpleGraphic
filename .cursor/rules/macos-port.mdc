@@ -1,0 +1,47 @@
+---
+description: macOS Apple Silicon port — project context and conventions for all work on this fork
+alwaysApply: true
+---
+
+# Project: SimpleGraphic macOS arm64 Port
+
+This fork's sole purpose is porting the SimpleGraphic C++ engine to native macOS Apple Silicon (arm64). All macOS work is on the `macos-port` branch.
+
+## What NOT to touch
+- Do not modify Windows-only code paths. Add `if(APPLE)` / `#ifdef __APPLE__` blocks alongside them — never replace or delete Windows code.
+- Do not modify anything in `src/` (that is the PoB Lua layer in a different repo — it needs zero changes).
+- Do not commit to `master` — that branch stays clean for upstream rebasing.
+
+## Architecture
+SimpleGraphic is a shared library (.dylib on macOS) that hosts LuaJIT and provides a GLFW window + ANGLE-based 2D renderer. The Lua game logic (~99% of PoB) is in a separate repo and requires no macOS changes.
+
+## Key decisions already made
+- **LuaJIT**: v2.1 branch via vcpkg, interpreter-only on arm64. Do not switch to a different Lua runtime without filing an issue first.
+- **Graphics**: ANGLE with Metal backend. Do not switch to native OpenGL unless ANGLE proves unworkable (document in issue #5 if so).
+- **Deployment target**: macOS 13.0. Do not lower this.
+- **vcpkg triplet**: `arm64-osx` defined in `triplets/arm64-osx.cmake`.
+
+## Task tracking
+Every task has a GitHub Issue. Before starting work, check [open issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen) and assign yourself. Branch naming: `macos/issue-N-short-description`.
+
+Current phase: **Phase 1** — get SimpleGraphic building on arm64 (issues #1–#5).
+
+## macOS build command
+```bash
+cmake -B build -S . \
+  -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
+  -DVCPKG_TARGET_TRIPLET=arm64-osx \
+  -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build build --config Release
+```
+
+## Platform files
+- `engine/system/win/sys_macos.mm` — macOS Obj-C++ implementations
+- `engine/system/win/sys_main.cpp` — platform abstraction (has `#ifdef __APPLE__` guards)
+- `engine/system/win/sys_video.cpp` — GLFW window/context (mostly cross-platform)
+- `win/entry.cpp` — Windows entry point; macOS needs `mac/entry.cpp` (issue #3)
+
+## PR conventions
+- Title: `[macOS] short description (closes #N)`
+- Always update the **Notes & Decisions Log** in `MACOS_PORT.md` for non-obvious choices
+- Close the issue and tick the checkbox in `MACOS_PORT.md` when a task is done

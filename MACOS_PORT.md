@@ -30,7 +30,7 @@ compiled for macOS and the CI is Windows-only.
 
 ### Tasks
 
-- [x] **1.1** Add `arm64-osx` vcpkg triplet file at `triplets/arm64-osx.cmake`
+- [x] **1.1** Add `arm64-osx` vcpkg triplet file at `triplets/arm64-osx.cmake` *(no issue — completed on setup)*
 
   ```cmake
   set(VCPKG_TARGET_ARCHITECTURE arm64)
@@ -40,7 +40,7 @@ compiled for macOS and the CI is Windows-only.
   set(VCPKG_OSX_ARCHITECTURES arm64)
   ```
 
-- [ ] **1.2** Resolve LuaJIT arm64 situation
+- [ ] **1.2** Resolve LuaJIT arm64 situation · [#1](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/1)
 
   LuaJIT's JIT compiler has no arm64 backend in stable releases. The vcpkg `luajit`
   port uses the `v2.1` beta branch, which runs in **interpreter mode** on Apple Silicon.
@@ -49,7 +49,7 @@ compiled for macOS and the CI is Windows-only.
   Decision log: use vcpkg's default `luajit` port (v2.1 branch, interpreter-only on arm64).
   Revisit if perf profiling shows this is a bottleneck.
 
-- [ ] **1.3** Complete the macOS system layer
+- [ ] **1.3** Complete the macOS system layer · [#2](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/2)
 
   Files to audit and extend:
 
@@ -60,14 +60,14 @@ compiled for macOS and the CI is Windows-only.
   | `engine/system/win/sys_video.cpp` | GLFW-based, likely cross-platform | Verify context creation works on macOS |
   | `win/entry.cpp` | Windows `WinMain` | Add `mac/entry.mm` (or `mac/entry.cpp`) with `int main()` |
 
-- [ ] **1.4** Add `mac/entry.cpp` as the macOS entry point, guarded in `CMakeLists.txt`
+- [ ] **1.4** Add `mac/entry.cpp` as the macOS entry point, guarded in `CMakeLists.txt` · [#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)
 
-- [ ] **1.5** Verify ANGLE Metal backend builds via vcpkg for `arm64-osx`
+- [ ] **1.5** Verify ANGLE Metal backend builds via vcpkg for `arm64-osx` · [#4](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/4)
 
   ANGLE on macOS targets its Metal backend. The `unofficial-angle` vcpkg port should
   handle this — verify it builds cleanly on an M-series Mac.
 
-- [ ] **1.6** Local smoke build
+- [ ] **1.6** Local smoke build · [#5](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/5)
 
   ```bash
   cmake -B build -S . \
@@ -87,7 +87,7 @@ compiled for macOS and the CI is Windows-only.
 
 ### Tasks
 
-- [ ] **2.1** Define macOS runtime layout in the PoB-PoE2 fork
+- [ ] **2.1** Define macOS runtime layout in the PoB-PoE2 fork · [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)
 
   Windows layout (existing):
   ```
@@ -110,11 +110,11 @@ compiled for macOS and the CI is Windows-only.
   SimpleGraphic's `CMakeLists.txt` `install()` rules already produce this layout —
   just needs a macOS build run piped into this directory.
 
-- [ ] **2.2** Set macOS user data directory to `~/Library/Application Support/Path of Building 2/`
+- [ ] **2.2** Set macOS user data directory to `~/Library/Application Support/Path of Building 2/` · [#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7)
 
   Implement in `sys_main.cpp` under the existing `#elif __APPLE__ && __MACH__` guard.
 
-- [ ] **2.3** Verify dev-mode launch
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)
 
   ```bash
   ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
@@ -122,7 +122,7 @@ compiled for macOS and the CI is Windows-only.
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 
-- [ ] **2.4** Fix any macOS-specific Lua-side issues
+- [ ] **2.4** Fix any macOS-specific Lua-side issues · [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9)
 
   The Lua layer should need zero changes. If issues appear, document them here.
 
@@ -134,7 +134,7 @@ compiled for macOS and the CI is Windows-only.
 
 ### Tasks
 
-- [ ] **3.1** Add CPack/CMake `.app` bundle config in SimpleGraphic's `CMakeLists.txt`
+- [ ] **3.1** Add CPack/CMake `.app` bundle config in SimpleGraphic's `CMakeLists.txt` · [#10](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/10)
 
   ```cmake
   if (APPLE)
@@ -148,18 +148,18 @@ compiled for macOS and the CI is Windows-only.
   endif()
   ```
 
-- [ ] **3.2** Code signing strategy
+- [ ] **3.2** Code signing strategy · [#11](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/11)
 
   - Initial release: ad-hoc signing (`codesign --deep --force --sign -`)
     Users see a first-launch warning; right-click → Open bypasses it.
   - Long-term: shared Apple Developer ID ($99/yr) funded by donations.
     Required for full notarization and no Gatekeeper warnings.
 
-- [ ] **3.3** DMG packaging
+- [ ] **3.3** DMG packaging · [#12](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/12)
 
   Use `create-dmg` (available via Homebrew) in CI to produce a distributable `.dmg`.
 
-- [ ] **3.4** Adapt auto-update system for macOS
+- [ ] **3.4** Adapt auto-update system for macOS · [#13](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/13)
 
   - Add `[runtime-macos]` section to `manifest.cfg` in the PoB-PoE2 fork
   - `UpdateApply.lua`: add `chmod +x` call on the new binary after download
@@ -175,7 +175,7 @@ and macOS.
 
 ### Tasks
 
-- [ ] **4.1** Add `macos-14` (Apple Silicon) to the CI matrix in `.github/workflows/main.yml`
+- [ ] **4.1** Add `macos-14` (Apple Silicon) to the CI matrix in `.github/workflows/main.yml` · [#14](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/14)
 
   GitHub Actions provides free `macos-14` arm64 runners for public repos.
 
@@ -209,7 +209,7 @@ and macOS.
       cmake --install build --prefix install-prefix
   ```
 
-- [ ] **4.2** Artifact upload for macOS dylibs
+- [ ] **4.2** Artifact upload for macOS dylibs · [#15](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/15)
 
   ```yaml
   - name: Archive macOS dylibs
@@ -224,12 +224,12 @@ and macOS.
       path: SimpleGraphicDylibs-arm64-osx.tar.gz
   ```
 
-- [ ] **4.3** Mirror the `update-simple-graphic.yml` dispatch in PoB-PoE2
+- [ ] **4.3** Mirror the `update-simple-graphic.yml` dispatch in PoB-PoE2 · [#16](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/16)
 
   On SimpleGraphic release, auto-PR the macOS dylibs into PoB-PoE2's
   `runtime-macos/` alongside the existing Windows DLL PR.
 
-- [ ] **4.4** Add macOS headless smoke-test job to PoB-PoE2 CI
+- [ ] **4.4** Add macOS headless smoke-test job to PoB-PoE2 CI · [#17](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/17)
 
   The existing Docker/Busted test suite runs Lua logic — no changes needed.
   Add a separate macOS job that launches `HeadlessWrapper.lua` to catch
