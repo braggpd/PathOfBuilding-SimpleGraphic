@@ -30,7 +30,7 @@ compiled for macOS and the CI is Windows-only.
 
 ### Tasks
 
-- [ ] **1.1** Add `arm64-osx` vcpkg triplet file at `triplets/arm64-osx.cmake`
+- [x] **1.1** Add `arm64-osx` vcpkg triplet file at `triplets/arm64-osx.cmake`
 
   ```cmake
   set(VCPKG_TARGET_ARCHITECTURE arm64)
@@ -294,3 +294,7 @@ Target command: `brew install --cask path-of-building-2`
   platform work scoped to SimpleGraphic; Lua layer requires zero changes.
 - **2026-05-22** — LuaJIT strategy: use vcpkg default `luajit` port (v2.1 branch),
   which runs in interpreter mode on arm64. Acceptable for PoB's workload.
+- **2026-05-22** — Phase 1.1 complete. Added `triplets/arm64-osx.cmake` with
+  `VCPKG_OSX_DEPLOYMENT_TARGET=13.0` (macOS Ventura, released 2022 — covers all
+  M-series hardware in active use). Registered as overlay in `vcpkg-configuration.json`.
+  The custom luajit port already has macOS patches and `TARGET_SYS=Darwin` support.
