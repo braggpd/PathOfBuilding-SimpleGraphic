@@ -27,7 +27,7 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
 
-**Next up:** issue #2 — complete the macOS system layer.
+**Next up:** issue #3 — macOS entry point (`mac/entry.cpp`).
 
 ## Key architectural decisions (do not revisit without discussion)
 

@@ -20,6 +20,8 @@
 #include <limits.h>
 #elif __APPLE__ && __MACH__
 #include <libproc.h>
+#include <spawn.h>
+extern char** environ;
 #endif
 
 #ifndef _WIN32
@@ -428,6 +430,18 @@ void sys_main_c::SpawnProcess(std::filesystem::path cmdName, const char* argList
 		ShellExecuteExW(&sinfo);
 	}
 	FreeWideString(wideArgs);
+#elif __APPLE__ && __MACH__
+	std::string cmdPath = cmdName.generic_string();
+	std::vector<char*> argv;
+	argv.push_back(const_cast<char*>(cmdPath.c_str()));
+	if (argList && argList[0]) {
+		argv.push_back(const_cast<char*>(argList));
+	}
+	argv.push_back(nullptr);
+
+	pid_t pid{};
+	int err = posix_spawn(&pid, cmdPath.c_str(), nullptr, nullptr, argv.data(), environ);
+	(void)err;
 #else
 #warning LV: Subprocesses not implemented on this OS.
 	// TODO(LV): Implement subprocesses for other OSes.
@@ -473,6 +487,8 @@ const char* PlatformOpenURL(const char* url)
 	return AllocString("URL opening not implemented on this OS.");
 #endif
 }
+#elif __APPLE__ && __MACH__
+const char* PlatformOpenURL(const char* url);
 #else
 const char* PlatformOpenURL(const char* url);
 #endif
@@ -579,6 +595,10 @@ std::filesystem::path FindBasePath()
 	return progPath.parent_path();
 }
 
+#if __APPLE__ && __MACH__
+std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> PlatformFindUserPath();
+#endif
+
 std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> FindUserPath()
 {
 #ifdef _WIN32
@@ -593,7 +613,9 @@ std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> Fin
 	CoTaskMemFree(osPath);
 	std::filesystem::path path(pathStr);
 	return { weakly_canonical(path), {} };
-#else
+#elif __APPLE__ && __MACH__
+	return PlatformFindUserPath();
+#elif defined(__linux__)
 	if (char const* data_home_path = getenv("XDG_DATA_HOME")) {
 		return { data_home_path, {} };
 	}

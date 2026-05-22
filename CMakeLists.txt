@@ -217,10 +217,12 @@ endif ()
 if (APPLE)
     find_library(CORE_FOUNDATION_LIBRARY CoreFoundation)
     find_library(APPLICATION_SERVICES_LIBRARY ApplicationServices)
+    find_library(FOUNDATION_FRAMEWORK Foundation)
     target_link_libraries(SimpleGraphic
         PRIVATE
         ${CORE_FOUNDATION_LIBRARY}
         ${APPLICATION_SERVICES_LIBRARY}
+        ${FOUNDATION_FRAMEWORK}
     )
 endif ()
 

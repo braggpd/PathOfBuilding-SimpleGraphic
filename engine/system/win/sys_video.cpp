@@ -20,6 +20,10 @@
 #include <imgui.h>
 #include <stb_image_resize.h>
 
+#if defined(__APPLE__)
+#include <ApplicationServices/ApplicationServices.h>
+#endif
+
 // ====================
 // sys_IVideo Interface
 // ====================
@@ -115,6 +119,8 @@ sys_video_c::sys_video_c(sys_IMain* sysHnd)
 		platformType = GLFW_ANGLE_PLATFORM_TYPE_D3D11;
 	else // Native Windows
 		platformType = GLFW_ANGLE_PLATFORM_TYPE_D3D11;
+#elif defined(__APPLE__)
+	platformType = GLFW_ANGLE_PLATFORM_TYPE_METAL;
 #endif
 	glfwInitHint(GLFW_ANGLE_PLATFORM_TYPE, platformType);
 	glfwInit();
@@ -134,6 +140,14 @@ std::optional<std::pair<double, double>> PlatformGetCursorPos() {
 	POINT curPos;
 	GetCursorPos(&curPos);
 	return std::make_pair((double)curPos.x, (double)curPos.y);
+#elif defined(__APPLE__)
+	CGEventRef event = CGEventCreate(nullptr);
+	if (!event) {
+		return {};
+	}
+	CGPoint loc = CGEventGetLocation(event);
+	CFRelease(event);
+	return std::make_pair((double)loc.x, (double)loc.y);
 #else
 	#warning LV : Global cursor position queries not implemented yet on this OS.
 		// TODO(LV): Implement on other OSes
