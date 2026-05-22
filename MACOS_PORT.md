@@ -110,7 +110,7 @@ compiled for macOS and the CI is Windows-only.
 
 ### Tasks
 
-- [ ] **2.1** Define macOS runtime layout in the PoB-PoE2 fork · [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)
+- [x] **2.1** Define macOS runtime layout in the PoB-PoE2 fork · [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)
 
   Windows layout (existing):
   ```
@@ -130,18 +130,24 @@ compiled for macOS and the CI is Windows-only.
     lcurl.so / lzip.so / socket.so / lua-utf8.so
   ```
 
-  SimpleGraphic's `CMakeLists.txt` `install()` rules already produce this layout —
-  just needs a macOS build run piped into this directory.
+  Produced by `cmake --install` (see `cmake/macos_bundle_runtime.cmake` for vcpkg dylibs).
+  Sync into PoB: `rsync -a ~/PoB-SimpleGraphic-build/runtime-macos/ /path/to/PoB/runtime-macos/`
+  and symlink `runtime/SimpleGraphic` → `runtime-macos/SimpleGraphic` for fonts/assets.
 
-- [ ] **2.2** Set macOS user data directory to `~/Library/Application Support/Path of Building 2/` · [#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7)
+- [x] **2.2** Set macOS user data directory to `~/Library/Application Support/Path of Building 2/` · [#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7)
 
-  Implement in `sys_main.cpp` under the existing `#elif __APPLE__ && __MACH__` guard.
+  Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
 - [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)
 
   ```bash
+  cd /path/to/PathOfBuilding-PoE2
+  ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic
   ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
   ```
+
+  macOS passes the Lua script as `argv[1]`; `sys_main.cpp` shifts args so `argv[0]` is the
+  script (matching Windows host behaviour).
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 

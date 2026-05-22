@@ -261,8 +261,28 @@ target_link_libraries(SimpleGraphic
     zstd::libzstd_shared
 )
 
+if (APPLE)
+    set(PoB_HOST_TARGET pob-host)
+    add_executable(${PoB_HOST_TARGET} mac/host.cpp)
+    set_target_properties(${PoB_HOST_TARGET} PROPERTIES
+        OUTPUT_NAME "Path of Building-PoE2"
+    )
+    target_link_libraries(${PoB_HOST_TARGET} PRIVATE SimpleGraphic)
+    set_target_properties(SimpleGraphic ${PoB_HOST_TARGET}
+        PROPERTIES
+            BUILD_RPATH "@executable_path;@loader_path"
+            INSTALL_RPATH "@executable_path;@loader_path"
+            MACOSX_RPATH ON
+    )
+endif ()
+
+if (APPLE)
+    install(TARGETS SimpleGraphic LIBRARY DESTINATION ".")
+    install(TARGETS ${PoB_HOST_TARGET} RUNTIME DESTINATION ".")
+else ()
+    install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
+endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:SimpleGraphic> DESTINATION ".")
-install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
 
 if (WIN32)
     set(DEPS_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
@@ -312,7 +332,14 @@ target_link_libraries(lcurl
     LuaJIT::LuaJIT
 )
 
-install(TARGETS lcurl RUNTIME DESTINATION ".")
+if (APPLE)
+    set_target_properties(lcurl PROPERTIES PREFIX "" SUFFIX ".so")
+endif ()
+if (APPLE)
+    install(TARGETS lcurl LIBRARY DESTINATION ".")
+else ()
+    install(TARGETS lcurl RUNTIME DESTINATION ".")
+endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:lcurl> DESTINATION ".")
 
 # luautf8 module
@@ -332,7 +359,14 @@ target_link_libraries(lua-utf8
     LuaJIT::LuaJIT
 )
 
-install(TARGETS lua-utf8 RUNTIME DESTINATION ".")
+if (APPLE)
+    set_target_properties(lua-utf8 PROPERTIES PREFIX "" SUFFIX ".so")
+endif ()
+if (APPLE)
+    install(TARGETS lua-utf8 LIBRARY DESTINATION ".")
+else ()
+    install(TARGETS lua-utf8 RUNTIME DESTINATION ".")
+endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:lua-utf8> DESTINATION ".")
 
 # luasocket module
@@ -372,8 +406,15 @@ if (WIN32)
     target_link_libraries(luasocket PRIVATE wsock32 ws2_32)
 endif ()
 
-set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" ) 
-install(TARGETS luasocket RUNTIME DESTINATION ".")
+set_target_properties(luasocket PROPERTIES OUTPUT_NAME "socket")
+if (APPLE)
+    set_target_properties(luasocket PROPERTIES PREFIX "" SUFFIX ".so")
+endif ()
+if (APPLE)
+    install(TARGETS luasocket LIBRARY DESTINATION ".")
+else ()
+    install(TARGETS luasocket RUNTIME DESTINATION ".")
+endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:luasocket> DESTINATION ".")
 
 # lzip module
@@ -390,5 +431,36 @@ target_link_libraries(lzip
     ZLIB::ZLIB
 )
 
-install(TARGETS lzip RUNTIME DESTINATION ".")
+if (APPLE)
+    set_target_properties(lzip PROPERTIES PREFIX "" SUFFIX ".so")
+endif ()
+if (APPLE)
+    install(TARGETS lzip LIBRARY DESTINATION ".")
+else ()
+    install(TARGETS lzip RUNTIME DESTINATION ".")
+endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:lzip> DESTINATION ".")
+
+if (APPLE)
+    set_target_properties(lcurl luasocket lzip lua-utf8
+        PROPERTIES
+            BUILD_RPATH "@executable_path;@loader_path"
+            INSTALL_RPATH "@executable_path;@loader_path"
+            MACOSX_RPATH ON
+    )
+
+    set(DEPS_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+    set(MACOS_BUNDLE_LIB_DIR "${DEPS_DIR}/lib")
+    set(MACOS_BUNDLE_SG_DYLIB "${CMAKE_CURRENT_BINARY_DIR}/libSimpleGraphic.dylib")
+    set(MACOS_BUNDLE_LCURL "${CMAKE_CURRENT_BINARY_DIR}/lcurl.so")
+    set(MACOS_BUNDLE_SOCKET "${CMAKE_CURRENT_BINARY_DIR}/socket.so")
+    set(MACOS_BUNDLE_LZIP "${CMAKE_CURRENT_BINARY_DIR}/lzip.so")
+    set(MACOS_BUNDLE_UTF8 "${CMAKE_CURRENT_BINARY_DIR}/lua-utf8.so")
+    set(_macos_bundle_script "${CMAKE_CURRENT_BINARY_DIR}/macos_bundle_runtime.cmake")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos_bundle_runtime.cmake"
+        "${_macos_bundle_script}"
+        @ONLY
+    )
+    install(SCRIPT "${_macos_bundle_script}")
+endif ()
