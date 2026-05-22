@@ -25,7 +25,7 @@ SimpleGraphic is a shared library (.dylib on macOS) that hosts LuaJIT and provid
 ## Task tracking
 Every task has a GitHub Issue. Before starting work, check [open issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen) and assign yourself. Branch naming: `macos/issue-N-short-description`.
 
-Current phase: **Phase 1** — SimpleGraphic arm64 build. **#1–#2 complete**. Next: **#3** macOS entry point.
+Current phase: **Phase 1** — SimpleGraphic arm64 build. **#1–#3 complete**. Next: **#4** ANGLE Metal vcpkg build.
 
 ## macOS build command
 ```bash
@@ -47,7 +47,8 @@ Standalone `luajit` needs `DYLD_LIBRARY_PATH` (no `LC_RPATH` on the tool); linke
 - `engine/system/win/sys_macos.mm` — macOS Obj-C++ implementations
 - `engine/system/win/sys_main.cpp` — platform abstraction (has `#ifdef __APPLE__` guards)
 - `engine/system/win/sys_video.cpp` — GLFW window/context (mostly cross-platform)
-- `win/entry.cpp` — Windows entry point; macOS needs `mac/entry.cpp` (issue #3)
+- `win/entry.cpp` — Windows `RunLuaFileAsWin` export
+- `mac/entry.cpp` — macOS `RunLuaFileAsWin` + `main()` (CMake selects via `APPLE`)
 
 ## PR conventions
 - Title: `[macOS] short description (closes #N)`

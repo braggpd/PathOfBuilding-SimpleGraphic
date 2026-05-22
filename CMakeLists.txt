@@ -62,7 +62,6 @@ set(SIMPLEGRAPHIC_SOURCES
     "engine/system/sys_main.h"
     "engine/system/sys_opengl.h"
     "engine/system/sys_video.h"
-    "win/entry.cpp"
     "ui.h"
     "ui_api.cpp"
     "ui_console.cpp"
@@ -75,6 +74,14 @@ set(SIMPLEGRAPHIC_SOURCES
     "ui_subscript.cpp"
     "ui_subscript.h"
 )
+
+if (APPLE)
+    list(APPEND SIMPLEGRAPHIC_SOURCES "mac/entry.cpp")
+elseif (WIN32)
+    list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
+else ()
+    list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
+endif ()
 
 set (SIMPLEGRAPHIC_PLATFORM_SOURCES)
 if (APPLE)

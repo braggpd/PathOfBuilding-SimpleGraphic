@@ -61,9 +61,12 @@ compiled for macOS and the CI is Windows-only.
   | `engine/system/win/sys_macos.mm` | `PlatformFindUserPath()` → `~/Library/Application Support/Path of Building 2/` |
   | `engine/system/win/sys_main.cpp` | `FindUserPath()` / `SpawnProcess()` (`posix_spawn`) on Apple; exe path via `proc_pidpath` (existing) |
   | `engine/system/win/sys_video.cpp` | `GLFW_ANGLE_PLATFORM_TYPE_METAL`; global cursor via `CGEventGetLocation` |
-  | `win/entry.cpp` | macOS entry deferred to **1.4** ([#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)) |
 
-- [ ] **1.4** Add `mac/entry.cpp` as the macOS entry point, guarded in `CMakeLists.txt` · [#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)
+- [x] **1.4** Add `mac/entry.cpp` as the macOS entry point, guarded in `CMakeLists.txt` · [#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)
+
+  `mac/entry.cpp` exports `RunLuaFileAsWin` (same symbol as Windows for the PoB host) and
+  provides `main()` for standalone dev launches. CMake selects `mac/entry.cpp` when
+  `APPLE`, `win/entry.cpp` on Windows, otherwise `win/entry.cpp` for Linux.
 
 - [ ] **1.5** Verify ANGLE Metal backend builds via vcpkg for `arm64-osx` · [#4](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/4)
 
@@ -309,6 +312,9 @@ Target command: `brew install --cask path-of-building-2`
   User data dir on macOS uses Application Support; ANGLE Metal GLFW hint; `posix_spawn`
   for `SpawnProcess`; `PlatformOpenURL` remains in `sys_macos.mm`. Full GLFW/context
   verification waits for Phase 1.6 smoke build.
+- **2026-05-22** — Phase 1.4 complete ([#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)).
+  `mac/entry.cpp` shares startup with Windows via `RunSimpleGraphic()`; `RunLuaFileAsWin`
+  remains the dylib export for the PoB host; `main()` supports standalone runs.
 - **2026-05-22** — Phase 1.1 complete. Added `triplets/arm64-osx.cmake` with
   `VCPKG_OSX_DEPLOYMENT_TARGET=13.0` (macOS Ventura, released 2022 — covers all
   M-series hardware in active use). Registered as overlay in `vcpkg-configuration.json`.

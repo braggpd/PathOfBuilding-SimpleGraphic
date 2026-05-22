@@ -22,12 +22,12 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 
 ## Current phase
 
-**Phase 1 — SimpleGraphic arm64 build** (issues #2–#5 open; **#1 complete**)
+**Phase 1 — SimpleGraphic arm64 build** (issues #4–#5 open; **#1–#3 complete**)
 
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
 
-**Next up:** issue #3 — macOS entry point (`mac/entry.cpp`).
+**Next up:** issue #4 — verify ANGLE Metal backend builds for `arm64-osx`.
 
 ## Key architectural decisions (do not revisit without discussion)
 
@@ -69,7 +69,8 @@ export DYLD_LIBRARY_PATH="$(pwd)/vcpkg/installed/arm64-osx/lib"
 | `engine/system/win/sys_main.cpp` | Platform entry, user data dir, thread/timer |
 | `engine/system/win/sys_macos.mm` | macOS-specific Obj-C++ implementations |
 | `engine/system/win/sys_video.cpp` | GLFW window + OpenGL context creation |
-| `win/entry.cpp` | Windows `WinMain` — macOS needs `mac/entry.cpp` equivalent |
+| `win/entry.cpp` | Windows DLL export `RunLuaFileAsWin` |
+| `mac/entry.cpp` | macOS `RunLuaFileAsWin` + `main()` (standalone dev launch) |
 | `triplets/arm64-osx.cmake` | vcpkg arm64-osx triplet definition |
 | `vcpkg-ports/ports/luajit/` | Custom LuaJIT port with macOS patches |
 | `MACOS_PORT.md` | Full plan, task checklist, decisions log |
