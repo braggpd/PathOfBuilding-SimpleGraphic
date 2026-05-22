@@ -40,14 +40,19 @@ compiled for macOS and the CI is Windows-only.
   set(VCPKG_OSX_ARCHITECTURES arm64)
   ```
 
-- [ ] **1.2** Resolve LuaJIT arm64 situation · [#1](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/1)
+- [x] **1.2** Resolve LuaJIT arm64 situation · [#1](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/1)
 
-  LuaJIT's JIT compiler has no arm64 backend in stable releases. The vcpkg `luajit`
-  port uses the `v2.1` beta branch, which runs in **interpreter mode** on Apple Silicon.
-  Performance is acceptable for PoB (calculation logic, not tight render loops).
+  Verified on Apple Silicon (2026-05-22): vcpkg overlay `luajit` port (`2023-01-04#7`, v2.1
+  beta) builds for `arm64-osx` and runs. **JIT is enabled** on arm64 (`jit.arch` = `arm64`,
+  LuaJIT 2.1.0-beta3) — not interpreter-only as originally assumed. Use vcpkg's custom
+  port; revisit only if perf profiling shows a bottleneck.
 
-  Decision log: use vcpkg's default `luajit` port (v2.1 branch, interpreter-only on arm64).
-  Revisit if perf profiling shows this is a bottleneck.
+  **Build requirement:** repo path must not contain spaces (LuaJIT `make` splits
+  `PREFIX` / `LUA_ROOT`). See Notes & Decisions Log.
+
+  **Standalone `luajit` tool:** set `DYLD_LIBRARY_PATH` to `vcpkg/installed/arm64-osx/lib`
+  (vcpkg install leaves no `LC_RPATH` on the tool binary). SimpleGraphic links via CMake
+  and is unaffected.
 
 - [ ] **1.3** Complete the macOS system layer · [#2](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/2)
 
@@ -266,7 +271,7 @@ Target command: `brew install --cask path-of-building-2`
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| LuaJIT arm64 JIT instability | Medium | Medium | Interpreter-only mode; PoB's bottleneck is calculation logic, not tight loops — acceptable perf |
+| LuaJIT arm64 JIT instability | Medium | Medium | v2.1 beta JIT enabled on arm64 (verified); fall back to `jit.off()` if needed; PoB bottleneck is calc logic, not tight loops |
 | ANGLE Metal backend issues | Medium | High | Fall back to native OpenGL (deprecated but functional on macOS 14+) via `find_package(OpenGL)` |
 | Apple code signing for auto-updates | High | Medium | Ship ad-hoc signed initially; updater prompts "re-open from Applications" on first run |
 | Upstream breaking changes in SimpleGraphic | Low | High | Pin SimpleGraphic version in PoB fork; test before upgrading |
@@ -292,8 +297,16 @@ Target command: `brew install --cask path-of-building-2`
 
 - **2026-05-22** — Initial plan created. Both repos forked to `braggpd`. All macOS
   platform work scoped to SimpleGraphic; Lua layer requires zero changes.
-- **2026-05-22** — LuaJIT strategy: use vcpkg default `luajit` port (v2.1 branch),
-  which runs in interpreter mode on arm64. Acceptable for PoB's workload.
+- **2026-05-22** — LuaJIT strategy: use vcpkg overlay `luajit` port (v2.1 branch).
+  Initial plan assumed interpreter-only on arm64; smoke test showed **JIT enabled**
+  (LuaJIT 2.1.0-beta3, `jit.arch` = `arm64`). Acceptable for PoB's workload.
+- **2026-05-22** — Phase 1.2 complete ([#1](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/1)).
+  `vcpkg install luajit --triplet arm64-osx` succeeds with overlay ports/triplets.
+  Interpreter smoke test: `luajit -e 'print(...)'` OK when `DYLD_LIBRARY_PATH` points at
+  installed `lib/`. **Paths with spaces break the build** (Makefile splits `PREFIX` at
+  whitespace — same class of issue as CONTRIBUTING.md warns for Windows). Use a clone or
+  worktree without spaces (e.g. `~/PoB-SimpleGraphic-build`) for local vcpkg/cmake work
+  until the port is patched or the main checkout is relocated.
 - **2026-05-22** — Phase 1.1 complete. Added `triplets/arm64-osx.cmake` with
   `VCPKG_OSX_DEPLOYMENT_TARGET=13.0` (macOS Ventura, released 2022 — covers all
   M-series hardware in active use). Registered as overlay in `vcpkg-configuration.json`.

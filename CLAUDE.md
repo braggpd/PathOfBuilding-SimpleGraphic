@@ -22,21 +22,27 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 
 ## Current phase
 
-**Phase 1 — SimpleGraphic arm64 build** (issues #1–#5 on this repo)
+**Phase 1 — SimpleGraphic arm64 build** (issues #2–#5 open; **#1 complete**)
 
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
+
+**Next up:** issue #2 — complete the macOS system layer.
 
 ## Key architectural decisions (do not revisit without discussion)
 
 | Decision | Choice | Reason |
 |---|---|---|
-| LuaJIT on arm64 | Interpreter-only (v2.1 branch via vcpkg) | No arm64 JIT backend in stable; acceptable perf for PoB's workload |
+| LuaJIT on arm64 | v2.1 beta via vcpkg overlay port; **JIT enabled** on arm64 (verified 2026-05-22) | Custom `luajit` port builds for `arm64-osx`; acceptable perf for PoB |
 | Graphics API | ANGLE (Metal backend on macOS) | Matches Windows path; avoids rewriting renderer |
 | Min deployment target | macOS 13.0 (Ventura) | Covers all M-series hardware in active use |
 | vcpkg triplet | `arm64-osx` in `triplets/arm64-osx.cmake` | Registered as overlay in `vcpkg-configuration.json` |
 
 ## Build command (macOS)
+
+**Path constraint:** the repository path must not contain spaces — LuaJIT's vcpkg
+`make` build splits `PREFIX` at whitespace and fails. Relocate the clone or use a
+worktree (e.g. `~/PoB-SimpleGraphic-build`) for vcpkg/cmake.
 
 ```bash
 cmake -B build -S . \
@@ -44,6 +50,16 @@ cmake -B build -S . \
   -DVCPKG_TARGET_TRIPLET=arm64-osx \
   -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build --config Release
+```
+
+**LuaJIT-only verify** (Phase 1.2 — classic manifest install of one port):
+
+```bash
+./vcpkg/bootstrap-vcpkg.sh
+./vcpkg/vcpkg install luajit --triplet arm64-osx --classic \
+  --overlay-ports=vcpkg-ports/ports --overlay-triplets=triplets
+export DYLD_LIBRARY_PATH="$(pwd)/vcpkg/installed/arm64-osx/lib"
+./vcpkg/installed/arm64-osx/tools/luajit/luajit -e 'print("ok", jit and jit.arch)'
 ```
 
 ## Files to know
