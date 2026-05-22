@@ -68,10 +68,15 @@ compiled for macOS and the CI is Windows-only.
   provides `main()` for standalone dev launches. CMake selects `mac/entry.cpp` when
   `APPLE`, `win/entry.cpp` on Windows, otherwise `win/entry.cpp` for Linux.
 
-- [ ] **1.5** Verify ANGLE Metal backend builds via vcpkg for `arm64-osx` · [#4](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/4)
+- [x] **1.5** Verify ANGLE Metal backend builds via vcpkg for `arm64-osx` · [#4](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/4)
 
-  ANGLE on macOS targets its Metal backend. The `unofficial-angle` vcpkg port should
-  handle this — verify it builds cleanly on an M-series Mac.
+  Verified on Apple Silicon (2026-05-22): `angle[metal]` for `arm64-osx` builds successfully.
+  Installed dylibs: `liblibEGL_angle.dylib`, `liblibGLESv2_angle.dylib` (CMake targets
+  `unofficial::angle::libEGL` / `libGLESv2`). Enable via `angle` + `metal` feature in
+  `vcpkg.json`.
+
+  **Triplet fix:** `triplets/arm64-osx.cmake` adds `-isystem …/usr/include/c++/v1` so
+  Apple Clang finds libc++ when `-isysroot` is set (required for ANGLE and other C++ ports).
 
 - [ ] **1.6** Local smoke build · [#5](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/5)
 
@@ -315,6 +320,10 @@ Target command: `brew install --cask path-of-building-2`
 - **2026-05-22** — Phase 1.4 complete ([#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)).
   `mac/entry.cpp` shares startup with Windows via `RunSimpleGraphic()`; `RunLuaFileAsWin`
   remains the dylib export for the PoB host; `main()` supports standalone runs.
+- **2026-05-22** — Phase 1.5 complete ([#4](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/4)).
+  `angle[metal]` builds for `arm64-osx`; `USE_METAL=ON`. Triplet adds libc++ `-isystem` path
+  (Apple Clang + `-isysroot` otherwise misses standard headers). Dylibs:
+  `liblibEGL_angle.dylib`, `liblibGLESv2_angle.dylib`.
 - **2026-05-22** — Phase 1.1 complete. Added `triplets/arm64-osx.cmake` with
   `VCPKG_OSX_DEPLOYMENT_TARGET=13.0` (macOS Ventura, released 2022 — covers all
   M-series hardware in active use). Registered as overlay in `vcpkg-configuration.json`.

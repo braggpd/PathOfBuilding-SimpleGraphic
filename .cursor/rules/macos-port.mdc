@@ -19,13 +19,14 @@ SimpleGraphic is a shared library (.dylib on macOS) that hosts LuaJIT and provid
 - **LuaJIT**: v2.1 beta via vcpkg overlay `luajit` port — **JIT enabled on arm64** (Phase 1.2 verified). Do not switch Lua runtime without filing an issue first.
 - **Graphics**: ANGLE with Metal backend. Do not switch to native OpenGL unless ANGLE proves unworkable (document in issue #5 if so).
 - **Deployment target**: macOS 13.0. Do not lower this.
-- **vcpkg triplet**: `arm64-osx` defined in `triplets/arm64-osx.cmake`.
+- **vcpkg triplet**: `arm64-osx` in `triplets/arm64-osx.cmake` (libc++ `-isystem` fix for Apple Clang).
+- **ANGLE**: `angle` dependency must include the **`metal` feature** in `vcpkg.json`.
 - **Build paths**: no spaces in the repo path (LuaJIT `make` breaks). Use `~/PoB-SimpleGraphic-build` worktree or relocate clone for local builds.
 
 ## Task tracking
 Every task has a GitHub Issue. Before starting work, check [open issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen) and assign yourself. Branch naming: `macos/issue-N-short-description`.
 
-Current phase: **Phase 1** — SimpleGraphic arm64 build. **#1–#3 complete**. Next: **#4** ANGLE Metal vcpkg build.
+Current phase: **Phase 1** — SimpleGraphic arm64 build. **#1–#4 complete**. Next: **#5** full smoke build.
 
 ## macOS build command
 ```bash
