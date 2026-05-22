@@ -5,6 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 
 if (APPLE)
     enable_language(OBJCXX)
+    # Apple Clang does not search libc++ under -isysroot for project targets (see triplets/arm64-osx.cmake).
+    execute_process(
+        COMMAND xcrun --sdk macosx --show-sdk-path
+        OUTPUT_VARIABLE MACOS_SDK_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    add_compile_options(
+        "$<$<OR:$<COMPILE_LANGUAGE:CXX>,$<COMPILE_LANGUAGE:OBJCXX>>:-isystem${MACOS_SDK_PATH}/usr/include/c++/v1>"
+    )
 endif ()
 
 if (MSVC)
@@ -83,20 +92,20 @@ else ()
     list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
 endif ()
 
-set (SIMPLEGRAPHIC_PLATFORM_SOURCES)
+set(SIMPLEGRAPHIC_PLATFORM_SOURCES)
 if (APPLE)
-    set (SIMPLEGRAPHIC_PLATFORM_SOURCES
+    list(APPEND SIMPLEGRAPHIC_PLATFORM_SOURCES
         "engine/system/win/sys_macos.mm"
     )
 endif()
 
 if (WIN32)
-    set (SIMPLEGRAPHIC_PLATFORM_SOURCES
+    list(APPEND SIMPLEGRAPHIC_PLATFORM_SOURCES
         "engine/system/win/sys_console.cpp"
         "SimpleGraphic.rc"
     )
 else()
-    set (SIMPLEGRAPHIC_PLATFORM_SOURCES
+    list(APPEND SIMPLEGRAPHIC_PLATFORM_SOURCES
         "engine/system/win/sys_console_unix.cpp"
     )
 endif()
@@ -310,10 +319,9 @@ install(FILES $<TARGET_RUNTIME_DLLS:lcurl> DESTINATION ".")
 
 add_library(lua-utf8 SHARED libs/luautf8/lutf8lib.c)
 
-target_compile_definitions(lua-utf8
-    PRIVATE
-    LUA_BUILD_AS_DLL
-)
+if (WIN32)
+    target_compile_definitions(lua-utf8 PRIVATE LUA_BUILD_AS_DLL)
+endif ()
 
 target_include_directories(lua-utf8
     PRIVATE
@@ -329,7 +337,7 @@ install(FILES $<TARGET_RUNTIME_DLLS:lua-utf8> DESTINATION ".")
 
 # luasocket module
 
-add_library(luasocket SHARED
+set(LUASOCKET_SOURCES
    "libs/luasocket/src/auxiliar.c"
    "libs/luasocket/src/buffer.c"
    "libs/luasocket/src/compat.c"
@@ -342,20 +350,27 @@ add_library(luasocket SHARED
    "libs/luasocket/src/tcp.c"
    "libs/luasocket/src/timeout.c"
    "libs/luasocket/src/udp.c"
-   "libs/luasocket/src/wsocket.c"
 )
+if (WIN32)
+    list(APPEND LUASOCKET_SOURCES "libs/luasocket/src/wsocket.c")
+else ()
+    list(APPEND LUASOCKET_SOURCES "libs/luasocket/src/usocket.c")
+endif ()
+
+add_library(luasocket SHARED ${LUASOCKET_SOURCES})
 
 target_include_directories(luasocket
     PRIVATE
-    ${LSOCKET_SOURCE_DIR}/src
+    "libs/luasocket/src"
 )
 
 target_link_libraries(luasocket
     PRIVATE
     LuaJIT::LuaJIT
-    wsock32
-    ws2_32
 )
+if (WIN32)
+    target_link_libraries(luasocket PRIVATE wsock32 ws2_32)
+endif ()
 
 set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" ) 
 install(TARGETS luasocket RUNTIME DESTINATION ".")

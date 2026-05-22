@@ -25,6 +25,7 @@
 
 // Modified for standalone inclusion in SimpleGraphic.
 
+#include <stddef.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus

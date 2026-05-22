@@ -78,14 +78,26 @@ compiled for macOS and the CI is Windows-only.
   **Triplet fix:** `triplets/arm64-osx.cmake` adds `-isystem …/usr/include/c++/v1` so
   Apple Clang finds libc++ when `-isysroot` is set (required for ANGLE and other C++ ports).
 
-- [ ] **1.6** Local smoke build · [#5](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/5)
+- [x] **1.6** Local smoke build · [#5](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/5)
+
+  Verified on Apple Silicon (2026-05-22): Release build in `~/PoB-SimpleGraphic-build`
+  (space-free worktree) produces `build/libSimpleGraphic.dylib` (~2 MB, arm64). Use
+  vcpkg-downloaded `cmake` + `ninja` (see Notes). Manifest uses builtin `luajit` for
+  `arm64-osx` (overlay port debug build still fails).
+
+  **CMake / code fixes for macOS:** append (not overwrite) `SIMPLEGRAPHIC_PLATFORM_SOURCES`
+  so `sys_macos.mm` is linked; libc++ `-isystem` for `OBJCXX`; `luasocket` → `usocket.c`;
+  `FindLuaJIT` library names; `IndexUTF8ToUTF32` outside `#ifdef _WIN32`; `sys->Sleep` in
+  `r_main.cpp`; `<thread>` + `std::min<size_t>` in `r_texture.cpp`; `LUA_BUILD_AS_DLL` only
+  on Windows for `lua-utf8`; `base64` includes for Apple Clang.
 
   ```bash
-  cmake -B build -S . \
+  cmake -B build -S . -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
     -DVCPKG_TARGET_TRIPLET=arm64-osx \
-    -DCMAKE_OSX_ARCHITECTURES=arm64
-  cmake --build build --config Release
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_BUILD_TYPE=Release
+  ninja -C build
   ```
 
   Success criterion: build completes without errors, `libSimpleGraphic.dylib` produced.
@@ -324,6 +336,9 @@ Target command: `brew install --cask path-of-building-2`
   `angle[metal]` builds for `arm64-osx`; `USE_METAL=ON`. Triplet adds libc++ `-isystem` path
   (Apple Clang + `-isysroot` otherwise misses standard headers). Dylibs:
   `liblibEGL_angle.dylib`, `liblibGLESv2_angle.dylib`.
+- **2026-05-22** — Phase 1.6 complete ([#5](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/5)).
+  Full SimpleGraphic + Lua modules link on `arm64-osx`; artifact `libSimpleGraphic.dylib`.
+  Runtime window / PoB launch is Phase 2.
 - **2026-05-22** — Phase 1.1 complete. Added `triplets/arm64-osx.cmake` with
   `VCPKG_OSX_DEPLOYMENT_TARGET=13.0` (macOS Ventura, released 2022 — covers all
   M-series hardware in active use). Registered as overlay in `vcpkg-configuration.json`.

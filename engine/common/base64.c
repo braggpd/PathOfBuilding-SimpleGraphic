@@ -28,6 +28,7 @@
 
 #include "base64.h"
 
+#include <string.h>
 #include <stdlib.h>
 
 /* ---- Base64 Encoding/Decoding Table --- */

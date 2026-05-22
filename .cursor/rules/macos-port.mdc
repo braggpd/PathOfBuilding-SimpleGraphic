@@ -26,7 +26,7 @@ SimpleGraphic is a shared library (.dylib on macOS) that hosts LuaJIT and provid
 ## Task tracking
 Every task has a GitHub Issue. Before starting work, check [open issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen) and assign yourself. Branch naming: `macos/issue-N-short-description`.
 
-Current phase: **Phase 1** — SimpleGraphic arm64 build. **#1–#4 complete**. Next: **#5** full smoke build.
+Current phase: **Phase 2** — runtime integration (PoB launch). **Phase 1 #1–#5 complete** (2026-05-22): `libSimpleGraphic.dylib` builds on `arm64-osx`.
 
 ## macOS build command
 ```bash

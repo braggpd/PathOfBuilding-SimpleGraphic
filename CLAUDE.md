@@ -22,12 +22,12 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 
 ## Current phase
 
-**Phase 1 — SimpleGraphic arm64 build** (issue #5 open; **#1–#4 complete**)
+**Phase 1 — SimpleGraphic arm64 build** (**#1–#5 complete** as of 2026-05-22)
 
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
 
-**Next up:** issue #5 — full local smoke build (`libSimpleGraphic.dylib`).
+**Next up:** Phase 2 — runtime integration (PoB dev-mode launch on macOS).
 
 ## Key architectural decisions (do not revisit without discussion)
 
