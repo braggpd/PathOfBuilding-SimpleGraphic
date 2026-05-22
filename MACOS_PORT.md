@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — script loads; SIGBUS during run)*
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — JIT disabled in engine; Launch.lua still faults in top-level chunk)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2
@@ -148,6 +148,10 @@ compiled for macOS and the CI is Windows-only.
 
   macOS passes the Lua script as `argv[1]`; `sys_main.cpp` shifts args so `argv[0]` is the
   script (matching Windows host behaviour).
+
+  **JIT:** `ui_main.cpp` calls `jit.off()` and stubs `jit.opt.start` before loading the
+  script (Launch.lua re-enables JIT otherwise). Full Launch.lua still hits `EXC_BAD_ACCESS`
+  in `libluajit` during the top-level chunk — further investigation needed.
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 

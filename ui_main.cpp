@@ -334,6 +334,21 @@ void ui_main_c::ScriptInit()
 	if (err) sys->Error("Error initialising Lua environment: \n%s\n", lua_tostring(L, -1));
 	lua_gc(L, LUA_GCRESTART, -1);
 
+#if __APPLE__ && __MACH__
+	// LuaJIT arm64 JIT faults during PoB startup (#8). Launch.lua calls jit.opt.start(); keep JIT off.
+	static char const* const kDisableJit =
+		"if jit then "
+		"jit.off() "
+		"jit.opt.start = function(...) end "
+		"end";
+	if (luaL_dostring(L, kDisableJit) != LUA_OK) {
+		sys->con->Printf("Warning: macOS JIT disable failed: %s\n", lua_tostring(L, -1));
+		lua_pop(L, 1);
+	} else {
+		sys->con->Printf("LuaJIT JIT disabled on macOS (interpreter mode).\n");
+	}
+#endif
+
 	// Setup debug system
 	debug = ui_IDebug::GetHandle(this);
 
