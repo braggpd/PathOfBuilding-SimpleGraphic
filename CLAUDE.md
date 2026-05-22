@@ -46,6 +46,16 @@ cmake -B build -S . \
 cmake --build build --config Release
 ```
 
+## Implementation specs
+
+Detailed per-issue execution specs live in `docs/macos/`. Each spec contains the
+exact files to create/modify, the exact content, key decisions, and a verification
+checklist. Always check for a spec before starting work on an issue.
+
+| Issue | Spec |
+|---|---|
+| #6 runtime-macos layout | `docs/macos/issue-6-runtime-layout.md` |
+
 ## Files to know
 
 | File | Purpose |
