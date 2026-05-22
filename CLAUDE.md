@@ -22,12 +22,14 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 
 ## Current phase
 
-**Phase 1 — SimpleGraphic arm64 build** (**#1–#5 complete** as of 2026-05-22)
+**Phase 2 — runtime integration** (active). **Phase 1 #1–#5 complete** (2026-05-22).
 
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
 
-**Next up:** Phase 2 — runtime integration (PoB dev-mode launch on macOS).
+**Active branch:** `macos/issue-6-runtime-layout` — [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)/[#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7) done in engine; **[#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) blocked on SIGBUS** during `Launch.lua`.
+
+**Next session:** see `MACOS_PORT.md` → **Next session — close #8** (bisect crash, fix `luaL_loadfile` path, lldb).
 
 ## Key architectural decisions (do not revisit without discussion)
 

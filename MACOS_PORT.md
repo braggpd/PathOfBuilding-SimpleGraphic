@@ -159,6 +159,87 @@ compiled for macOS and the CI is Windows-only.
 
   The Lua layer should need zero changes. If issues appear, document them here.
 
+### Next session — close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) (dev launch)
+
+**Branch:** `macos/issue-6-runtime-layout` (merge to `macos-port` after #8 passes).
+
+**Done this session (engine, not yet merged to `macos-port`):**
+
+- `runtime-macos/` install layout + `pob-host` launcher ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6))
+- macOS argv shift, `launchCwd`, `jit.off()` + `jit.opt.start` stub ([#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8))
+- Launch reaches `Running script...` with correct `Script: .../src/Launch.lua` path
+
+**Blocker:** process exits with **SIGBUS (exit 138)** during/after top-level `Launch.lua`.
+lldb (pre–`jit.off` stub): `EXC_BAD_ACCESS` in `libluajit-5.1.2.1.0.dylib`. Isolation:
+`ConExecute` / `SetWindowTitle` likely OK; full Launch still faults.
+
+**Success criterion (unchanged):** UI renders, passive tree loads, basic calculations run.
+
+#### Step 1 — Rebuild and sync (every session)
+
+```bash
+# Build (space-free worktree)
+cd ~/PoB-SimpleGraphic-build
+git fetch <main-repo> macos/issue-6-runtime-layout && git checkout macos/issue-6-runtime-layout
+./vcpkg/downloads/tools/ninja-1.13.2-osx/ninja -C build
+cp build/libSimpleGraphic.dylib build/"Path of Building-PoE2" ~/PoB-PoE2-build/runtime-macos/
+
+# Launch from PoB repo root (not runtime-macos/)
+cd ~/PoB-PoE2-build
+ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic
+./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
+```
+
+Expect log line: `LuaJIT JIT disabled on macOS (interpreter mode).`
+
+#### Step 2 — Engine fix: `luaL_loadfile` full path
+
+In `ui_main.cpp` `ScriptInit()`, change load from `scriptName.filename()` to the full
+resolved path (`scriptName.generic_u8string()`). Required for bisection scripts and
+correct behaviour when `scriptName` is absolute.
+
+#### Step 3 — Bisect SIGBUS (find faulting line)
+
+Copy `src/Launch.lua` → `src/Launch_bisect.lua` in PoB repo; trim top-level lines and
+re-run host with `./src/Launch_bisect.lua`:
+
+| Stage | Include |
+|-------|---------|
+| A | Lines 1–13 (`SetWindowTitle`, `ConExecute` vid_mode/resizable) |
+| B | + `SetMainObject(launch)` |
+| C | + `collectgarbage("setpause", 400)` |
+| D | Full file (engine then calls `launch:OnInit()`) |
+
+If A–C pass but D fails → debug **`launch:OnInit()`** (`require("xml")`, `RenderInit`,
+`PLoadModule("Modules/Main")`), not packaging or argv.
+
+#### Step 4 — lldb backtrace (one run)
+
+```bash
+cd ~/PoB-PoE2-build
+lldb ./runtime-macos/"Path of Building-PoE2"
+settings set target.run-args ./src/Launch.lua
+run
+bt
+```
+
+Do not pipe through `head` while the GUI runs; use `bt` after stop or crash.
+
+#### Step 5 — Optional: macOS `print()` (`ui_api.cpp` `l_print`)
+
+Minimal test scripts fail with `print() error: tostring returned non-string`. Helpful for
+bisection only; not required to close #8 if the UI launches.
+
+#### Step 6 — After #8 passes
+
+- [ ] Close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8); file Lua issues in [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9) if any
+- [ ] Merge `macos/issue-6-runtime-layout` → `macos-port`, push
+- [ ] PoB fork: commit `runtime-macos/` layout + sync instructions ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6) on PoB repo)
+- [ ] Defer Phase 3–4 (.app, CI, signing) until dev launch is stable
+- [ ] Revisit LuaJIT JIT on arm64 only after stable launch (interpreter OK for now)
+
+**PoB clone path:** `~/PoB-PoE2-build` (dev branch). **Do not** build in a path containing spaces.
+
 ---
 
 ## Phase 3 — .app Bundle & Distribution
@@ -353,3 +434,8 @@ Target command: `brew install --cask path-of-building-2`
   `VCPKG_OSX_DEPLOYMENT_TARGET=13.0` (macOS Ventura, released 2022 — covers all
   M-series hardware in active use). Registered as overlay in `vcpkg-configuration.json`.
   The custom luajit port already has macOS patches and `TARGET_SYS=Darwin` support.
+- **2026-05-22** — Phase 2.1–2.2 engine work on `macos/issue-6-runtime-layout` ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6), [#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7)).
+  `cmake/macos_bundle_runtime.cmake` copies vcpkg dylibs into `runtime-macos/`. Host
+  `pob-host` → `Path of Building-PoE2`. [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) in progress: argv/`launchCwd` fixes,
+  interpreter-only on macOS (`jit.off` + stub `jit.opt.start`). SIGBUS remains — see
+  **Next session — close #8** above.
