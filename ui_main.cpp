@@ -222,9 +222,26 @@ void ui_main_c::Init(int argc, char** argv)
 	// Find paths
 	scriptName = std::filesystem::u8path(argv[0]);
 	if (scriptName.is_relative()) {
-		scriptName = sys->basePath / scriptName;
+#if __APPLE__ && __MACH__
+		// SetWorkDir() runs before Init; resolve scripts from the original launch directory.
+		auto fromLaunch = sys->launchCwd / scriptName;
+		if (std::filesystem::exists(fromLaunch)) {
+			scriptName = fromLaunch;
+		} else
+#endif
+		{
+			scriptName = sys->basePath / scriptName;
+		}
 	}
-	scriptName = canonical(scriptName);
+	{
+		std::error_code ec;
+		auto resolved = std::filesystem::weakly_canonical(scriptName, ec);
+		if (ec) {
+			sys->Error("Script path error for '%s': %s",
+				scriptName.generic_u8string().c_str(), ec.message().c_str());
+		}
+		scriptName = resolved;
+	}
 
 	scriptCfg = scriptName;
 	scriptCfg.replace_extension(".cfg");
@@ -316,6 +333,21 @@ void ui_main_c::ScriptInit()
 	int err = lua_pcall(L, 0, 0, 0);
 	if (err) sys->Error("Error initialising Lua environment: \n%s\n", lua_tostring(L, -1));
 	lua_gc(L, LUA_GCRESTART, -1);
+
+#if __APPLE__ && __MACH__
+	// LuaJIT arm64 JIT faults during PoB startup (#8). Launch.lua calls jit.opt.start(); keep JIT off.
+	static char const* const kDisableJit =
+		"if jit then "
+		"jit.off() "
+		"jit.opt.start = function(...) end "
+		"end";
+	if (luaL_dostring(L, kDisableJit) != LUA_OK) {
+		sys->con->Printf("Warning: macOS JIT disable failed: %s\n", lua_tostring(L, -1));
+		lua_pop(L, 1);
+	} else {
+		sys->con->Printf("LuaJIT JIT disabled on macOS (interpreter mode).\n");
+	}
+#endif
 
 	// Setup debug system
 	debug = ui_IDebug::GetHandle(this);

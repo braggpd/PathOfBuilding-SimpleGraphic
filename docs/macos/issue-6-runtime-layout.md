@@ -1,9 +1,17 @@
 # Issue #6 — Implementation Spec: `runtime-macos` Directory Layout
 
-**Repo where work happens:** `braggpd/PathOfBuilding-PoE2` (local: `~/repos/PathOfBuilding-PoE2`)
-**Branch:** `macos-port`
-**Blocks:** Issue #8 (dev-mode launch), Issue #13 (auto-update)
+**Repo where work happens:** `braggpd/PathOfBuilding-PoE2` (local: `~/repos/PathOfBuilding-PoE2` or `~/PoB-PoE2-build`)
+**Branch:** `macos-port` (SimpleGraphic); PoB fork `macos-port` for Part A
+**Enables:** Issue #8 (dev-mode launch — correct install layout and module names)
+**Does not fix:** Issue #8 SIGBUS during `Launch.lua` (separate engine/Lua debug track)
 **Depends on:** Issue #3 (entry point binary name), Issue #2 (platform string "darwin")
+
+## Status (2026-05-22)
+
+| Part | Status |
+|------|--------|
+| **A** PoB scaffolding | Done in PoB fork (`runtime-macos/README.md`, `manifest.cfg` / `manifest.xml`) |
+| **B** SimpleGraphic CMake | **Merged to `macos-port`** — see `cmake/macos_bundle_runtime.cmake`, `pob-host`, per-target `.so` / `LIBRARY` install |
 
 ---
 
@@ -12,7 +20,7 @@
 This issue has two parts that can be done independently:
 
 - **Part A** — scaffolding in `braggpd/PathOfBuilding-PoE2` (do now, no blockers)
-- **Part B** — CMakeLists.txt fixes in `braggpd/PathOfBuilding-SimpleGraphic` (prerequisite for Phase 1.6)
+- **Part B** — CMakeLists.txt fixes in `braggpd/PathOfBuilding-SimpleGraphic` (**done on `macos-port`**)
 
 ---
 
@@ -21,6 +29,10 @@ This issue has two parts that can be done independently:
 ### A1. Create `runtime-macos/README.md`
 
 **File:** `runtime-macos/README.md`
+
+Document expected binaries after `cmake --install`. Versioned dylib names from vcpkg are normal, e.g.
+`libluajit-5.1.2.1.0.dylib`, `liblibEGL_angle.dylib`, `liblibGLESv2_angle.dylib` (not the
+idealized short names in the table below).
 
 ```markdown
 # runtime-macos
@@ -34,27 +46,27 @@ Do not commit binary files here — they are produced by CI and attached to rele
 |---|---|
 | `Path of Building-PoE2` | Mach-O arm64 binary |
 | `libSimpleGraphic.dylib` | SimpleGraphic engine |
-| `liblua51.dylib` | LuaJIT runtime |
+| `libluajit-*.dylib` | LuaJIT runtime (vcpkg versioned name) |
 | `lcurl.so` | Lua curl module |
 | `lzip.so` | Lua zip module |
 | `socket.so` | Lua socket module |
 | `lua-utf8.so` | Lua UTF-8 module |
-| `libEGL.dylib` | ANGLE EGL (Metal backend) |
-| `libGLESv2.dylib` | ANGLE GLES2 (Metal backend) |
-| `libglfw.3.dylib` | GLFW window management |
-| `libcurl.dylib` | libcurl |
-| `libfmt.dylib` | fmt |
-| `libre2.dylib` | re2 regex |
-| `libzstd.dylib` | zstd compression |
-| `libwebpdecoder.dylib` | WebP decoder |
-| `libz.dylib` | zlib |
+| `liblibEGL_angle.dylib` | ANGLE EGL (Metal backend) |
+| `liblibGLESv2_angle.dylib` | ANGLE GLES2 (Metal backend) |
+| `libglfw.*.dylib` | GLFW window management |
+| `libcurl.*.dylib` | libcurl (+ OpenSSL deps as needed) |
+| `libfmt.*.dylib` | fmt |
+| `libre2.*.dylib` | re2 regex |
+| `libzstd.*.dylib` | zstd compression |
+| `libwebpdecoder.*.dylib` | WebP decoder |
+| `libz.*.dylib` | zlib |
 | `lua/` | Pure Lua scripts (shared with `runtime/lua/`) |
 
 ## Lua module naming
 
 Lua's `require()` resolves `lcurl` → `lcurl.so` (no `lib` prefix, `.so` extension).
 CMake must set `PREFIX ""` and `SUFFIX ".so"` on all Lua module targets for macOS.
-See SimpleGraphic CMakeLists.txt Part B fixes in `docs/macos/issue-6-runtime-layout.md`.
+See Part B in this spec and `CMakeLists.txt` on `macos-port`.
 
 ## Platform string
 
@@ -110,72 +122,67 @@ if not node.attrib.platform or node.attrib.platform == localPlatform then
 
 ## Part B: SimpleGraphic CMakeLists.txt fixes
 
-**File:** `CMakeLists.txt` in `braggpd/PathOfBuilding-SimpleGraphic`
+**File:** `CMakeLists.txt` in `braggpd/PathOfBuilding-SimpleGraphic` — **implemented on `macos-port`**.
 
-These changes must land before issue #5 (smoke build) can succeed.
+These changes are required for `cmake --install` to produce a usable `runtime-macos/` tree.
 
 ### B1. Fix `install(TARGETS ... RUNTIME)` for shared libraries
 
 On macOS, `.dylib` files are the `LIBRARY` component, not `RUNTIME`.
-Every `install(TARGETS X RUNTIME DESTINATION ".")` silently installs nothing on macOS.
+`install(TARGETS X RUNTIME DESTINATION ".")` alone installs nothing for dylibs.
 
-Find every block matching this pattern and add `LIBRARY DESTINATION "."`:
+On `macos-port`, Apple targets use `install(TARGETS … LIBRARY DESTINATION ".")` and the
+host launcher uses `RUNTIME`:
 
 ```cmake
-# BEFORE
-install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
-install(TARGETS lcurl RUNTIME DESTINATION ".")
-install(TARGETS lua-utf8 RUNTIME DESTINATION ".")
-install(TARGETS luasocket RUNTIME DESTINATION ".")
-install(TARGETS lzip RUNTIME DESTINATION ".")
-
-# AFTER
-install(TARGETS SimpleGraphic RUNTIME DESTINATION "." LIBRARY DESTINATION ".")
-install(TARGETS lcurl RUNTIME DESTINATION "." LIBRARY DESTINATION ".")
-install(TARGETS lua-utf8 RUNTIME DESTINATION "." LIBRARY DESTINATION ".")
-install(TARGETS luasocket RUNTIME DESTINATION "." LIBRARY DESTINATION ".")
-install(TARGETS lzip RUNTIME DESTINATION "." LIBRARY DESTINATION ".")
+if (APPLE)
+    install(TARGETS SimpleGraphic LIBRARY DESTINATION ".")
+    install(TARGETS ${PoB_HOST_TARGET} RUNTIME DESTINATION ".")
+else ()
+    install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
+endif ()
 ```
+
+(`PoB_HOST_TARGET` is `pob-host` with `OUTPUT_NAME "Path of Building-PoE2"`.)
 
 ### B2. Fix Lua module naming on macOS
 
 `require("lcurl")` looks for `lcurl.so` — no `lib` prefix, `.so` extension.
-CMake names shared libs `liblcurl.dylib` by default on macOS.
 
-Add this block after the Lua module target definitions, before the first `install()`:
+Per-target on `macos-port`:
 
 ```cmake
 if (APPLE)
-    foreach(lua_target lcurl lua-utf8 luasocket lzip)
-        set_target_properties(${lua_target} PROPERTIES
-            PREFIX ""
-            SUFFIX ".so"
-        )
-    endforeach()
-endif()
+    set_target_properties(lcurl PROPERTIES PREFIX "" SUFFIX ".so")
+endif ()
 ```
 
-Note: `luasocket` already sets `OUTPUT_NAME "socket"` — that still applies; this
-just changes the prefix/suffix.
+(same pattern for `lua-utf8`, `luasocket`, `lzip`; `luasocket` keeps `OUTPUT_NAME "socket"`.)
 
 ### B3. Fix transitive dependency installation on macOS
 
-`$<TARGET_RUNTIME_DLLS:X>` expands to nothing on macOS (it's a Windows-only feature).
-The `install(FILES $<TARGET_RUNTIME_DLLS:X> DESTINATION ".")` lines silently no-op.
+`$<TARGET_RUNTIME_DLLS:X>` is Windows-only and no-ops on macOS.
 
-Replace the transitive-dep install block with a macOS-aware version:
+**Do not** use a blind `file(GLOB …/lib/*.dylib)` — that copies the entire vcpkg lib tree.
+
+On `macos-port`, use `cmake/macos_bundle_runtime.cmake` installed via `install(SCRIPT …)`:
+
+- `file(GET_RUNTIME_DEPENDENCIES)` on the built engine, host, and Lua modules
+- Copies only resolved transitive dylibs next to the install prefix
+- Excludes `/System/` and `/usr/lib/`
+
+Relevant `CMakeLists.txt` tail:
 
 ```cmake
-if (APPLE)
-    # Install vcpkg-managed dylibs. TARGET_RUNTIME_DLLS is Windows-only.
-    set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib")
-    file(GLOB VCPKG_DYLIBS "${VCPKG_LIB_DIR}/*.dylib")
-    install(FILES ${VCPKG_DYLIBS} DESTINATION ".")
-endif()
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos_bundle_runtime.cmake"
+    "${_macos_bundle_script}"
+    @ONLY
+)
+install(SCRIPT "${_macos_bundle_script}")
 ```
 
-Place this block after the `if (WIN32)` DLL install block, inside `else()` or a
-separate `if (APPLE)` guard.
+Also set `BUILD_RPATH` / `INSTALL_RPATH` to `@executable_path;@loader_path` for engine, host, and Lua modules.
 
 ---
 
@@ -187,33 +194,39 @@ separate `if (APPLE)` guard.
 | Lua module extension | `.so` | LuaJIT's `require()` searches `?.so` before `?.dylib` |
 | Lua module prefix | `""` (none) | `require("lcurl")` → `lcurl.so`, not `liblcurl.so` |
 | Shared lib install component | `LIBRARY` | macOS dylibs are `LIBRARY`, not `RUNTIME` in CMake |
-| Transitive deps | vcpkg `lib/*.dylib` glob | `$<TARGET_RUNTIME_DLLS>` is Windows-only |
+| Transitive deps | `macos_bundle_runtime.cmake` | Dependency closure, not full vcpkg glob |
+| Dev host binary | `Path of Building-PoE2` | Matches Windows updater/runtime naming ([#3](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/3)) |
 
 ---
 
 ## Verification
 
-After completing Part A and Part B:
+After Part A and a Release build on `macos-port`:
 
-1. Run the smoke build (issue #5):
+1. Build and install:
    ```bash
-   cmake -B build -S . \
-     -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
-     -DVCPKG_TARGET_TRIPLET=arm64-osx \
-     -DCMAKE_OSX_ARCHITECTURES=arm64
-   cmake --build build --config Release
-   cmake --install build --prefix ~/repos/PathOfBuilding-PoE2/runtime-macos
+   cd ~/PoB-SimpleGraphic-build   # path must not contain spaces
+   git checkout macos-port
+   ninja -C build
+   cmake --install build --prefix ~/PoB-PoE2-build/runtime-macos
    ```
 
 2. Verify output:
    ```bash
-   ls ~/repos/PathOfBuilding-PoE2/runtime-macos/
-   file ~/repos/PathOfBuilding-PoE2/runtime-macos/libSimpleGraphic.dylib
+   ls ~/PoB-PoE2-build/runtime-macos/
+   file ~/PoB-PoE2-build/runtime-macos/libSimpleGraphic.dylib
    # expect: Mach-O 64-bit dynamically linked shared library arm64
    ```
 
-3. Verify Lua modules are named correctly:
+3. Verify Lua modules:
    ```bash
-   ls ~/repos/PathOfBuilding-PoE2/runtime-macos/*.so
+   ls ~/PoB-PoE2-build/runtime-macos/*.so
    # expect: lcurl.so  lzip.so  lua-utf8.so  socket.so
+   ```
+
+4. Dev launch (Issue #8 — may still SIGBUS until engine/Lua crash is fixed):
+   ```bash
+   cd ~/PoB-PoE2-build
+   ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic
+   ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
    ```

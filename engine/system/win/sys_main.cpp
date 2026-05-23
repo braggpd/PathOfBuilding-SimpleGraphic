@@ -663,6 +663,7 @@ bool sys_main_c::Run(int argc, char** argv)
 	errorRaised = false;
 	baseTime = std::chrono::system_clock::now();
 
+	launchCwd = std::filesystem::current_path();
 	SetWorkDir();
 
 	// Get system interfaces
@@ -688,8 +689,21 @@ bool sys_main_c::Run(int argc, char** argv)
 		}
 #endif
 
+#if __APPLE__ && __MACH__
+		// PoB passes the Lua entry script as argv[1]; Windows hosts pass it as argv[0].
+		int appArgc = argc;
+		char** appArgv = argv;
+		if (argc > 1) {
+			--appArgc;
+			++appArgv;
+		}
+#else
+		int appArgc = argc;
+		char** appArgv = argv;
+#endif
+
 		// Initialise engine
-		core->Init(argc, argv);
+		core->Init(appArgc, appArgv);
 
 		// Run frame loop
 		while (exitFlag == false) {
@@ -732,7 +746,8 @@ bool sys_main_c::Run(int argc, char** argv)
 	}
 #else
 	catch (std::exception& e) {
-		Error("Exception: ", e.what());
+		const char* what = e.what();
+		Error("Exception: %s", (what && what[0]) ? what : "(no message)");
 	}
 #endif
 

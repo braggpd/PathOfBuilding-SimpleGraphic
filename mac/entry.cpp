@@ -35,8 +35,3 @@ extern "C" SIMPLEGRAPHIC_DLL_PUBLIC int RunLuaFileAsWin(int argc, char** argv)
 {
 	return RunSimpleGraphic(argc, argv);
 }
-
-int main(int argc, char** argv)
-{
-	return RunSimpleGraphic(argc, argv);
-}
