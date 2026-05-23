@@ -406,11 +406,11 @@ void ui_main_c::ScriptInit()
 	if ( !didExit && !restartFlag ) {
 		// Check for frame callback
 		int extraArgs = PushCallback("OnFrame");
-		if (extraArgs >= 0) {
-			lua_pop(L, 1 + extraArgs);
-		} else {
+		if (extraArgs < 0) {
 			sys->con->Printf("\nScript didn't set frame callback, exiting...\n");
 			sys->Exit();
+		} else if (lua_gettop(L) > 1 && lua_isfunction(L, 1)) {
+			lua_settop(L, 1);
 		}
 	}
 }
@@ -562,7 +562,7 @@ bool ui_main_c::CanExit()
 
 void ui_main_c::KeyEvent(int key, int type)
 {
-	if (conUI->KeyEvent(key, type)) {
+	if (conUI && conUI->KeyEvent(key, type)) {
 		return;
 	}
 
@@ -577,7 +577,9 @@ void ui_main_c::KeyEvent(int key, int type)
 	case KE_KEYUP:
 		switch (key) {
 		case KEY_F10:
-			renderer->ToggleDebugImGui();
+			if (renderer) {
+				renderer->ToggleDebugImGui();
+			}
 			break;
 		case KEY_PAUSE:
 			if (sys->IsKeyDown(KEY_SHIFT)) {

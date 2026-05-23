@@ -714,7 +714,7 @@ bool sys_main_c::Run(int argc, char** argv)
 				glfwPollEvents();
 			}
 			auto wnd = (GLFWwindow*)video->GetWindowHandle();
-			if (glfwWindowShouldClose(wnd)) {
+			if (wnd && glfwWindowShouldClose(wnd)) {
 				Exit();
 				break;
 			}

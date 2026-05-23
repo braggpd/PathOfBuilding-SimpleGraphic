@@ -702,9 +702,9 @@ SG_LUA_CPP_FUN_END()
 static int l_RenderInit(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
-	int n = lua_gettop(L);
+	const int nargs = lua_gettop(L);
 	bool dpiAware = false;
-	for (int i = 1; i <= n; ++i) {
+	for (int i = 1; i <= nargs; ++i) {
 		ui->LAssert(L, lua_isstring(L, i), "RenderInit() argument %d: expected string, got %s", i, luaL_typename(L, i));
 		char const* str = lua_tostring(L, i);
 		if (strcmp(str, "DPI_AWARE") == 0) {
@@ -716,6 +716,10 @@ static int l_RenderInit(lua_State* L)
 		features = (r_featureFlag_e)(features | F_DPI_AWARE);
 	}
 	ui->RenderInit(features);
+#if __APPLE__ && __MACH__
+	// RenderInit may run console/window setup; drop stray stack values before return.
+	lua_settop(L, nargs);
+#endif
 	return 0;
 }
 
@@ -1898,6 +1902,7 @@ static int l_IsSubScriptRunning(lua_State* L)
 	return 1;
 }
 
+#if !(__APPLE__ && __MACH__)
 SG_LUA_CPP_FUN_BEGIN(LoadModule)
 {
 	ui_main_c* ui = GetUIPtr(L);
@@ -1905,52 +1910,58 @@ SG_LUA_CPP_FUN_BEGIN(LoadModule)
 	ui->LExpect(L, n >= 1, "Usage: LoadModule(name[, ...])");
 	ui->LExpect(L, lua_isstring(L, 1), "LoadModule() argument 1: expected string, got %s", luaL_typename(L, 1));
 	const char* modName = lua_tostring(L, 1);
+	const int extraArgs = n - 1;
 	auto fileName = std::filesystem::u8path(modName);
 	if (!fileName.has_extension()) {
 		fileName.replace_extension(".lua");
 	}
+	auto filePath = (ui->scriptPath / fileName).lexically_normal();
 
 	ui->sys->SetWorkDir(ui->scriptPath);
-	auto fileStr = fileName.generic_u8string();
+	auto fileStr = filePath.generic_u8string();
 	int err = luaL_loadfile(L, fileStr.c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	ui->LExpect(L, err == 0, "LoadModule() error loading '%s' (%d):\n%s", fileStr.c_str(), err, lua_tostring(L, -1));
-	lua_replace(L, 1);	// Replace module name with module main chunk
-	lua_call(L, n - 1, LUA_MULTRET);
+	lua_replace(L, 1); // modName -> chunk
+	lua_call(L, extraArgs, LUA_MULTRET);
 	return lua_gettop(L);
 }
 SG_LUA_CPP_FUN_END()
+#endif
 
+#if !(__APPLE__ && __MACH__)
 SG_LUA_CPP_FUN_BEGIN(PLoadModule)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	int n = lua_gettop(L);
 	ui->LExpect(L, n >= 1, "Usage: PLoadModule(name[, ...])");
 	ui->LExpect(L, lua_isstring(L, 1), "PLoadModule() argument 1: expected string, got %s", luaL_typename(L, 1));
-	const char* modName = lua_tostring(L, 1);
-	auto fileName = std::filesystem::u8path(modName);
+	const int extraArgs = n - 1;
+	auto fileName = std::filesystem::u8path(lua_tostring(L, 1));
 	if (!fileName.has_extension()) {
 		fileName.replace_extension(".lua");
 	}
+	auto filePath = (ui->scriptPath / fileName).lexically_normal();
 
 	ui->sys->SetWorkDir(ui->scriptPath);
-	int err = luaL_loadfile(L, fileName.generic_u8string().c_str());
+	int err = luaL_loadfile(L, filePath.generic_u8string().c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	if (err) {
 		return 1;
 	}
-	lua_replace(L, 1);	// Replace module name with module main chunk
+	lua_replace(L, 1); // modName -> chunk
 	lua_getfield(L, LUA_REGISTRYINDEX, "traceback");
-	lua_insert(L, 1); // Insert traceback function at start of stack
-	err = lua_pcall(L, n - 1, LUA_MULTRET, 1);
+	lua_insert(L, 1);
+	err = lua_pcall(L, extraArgs, LUA_MULTRET, 1);
 	if (err) {
 		return 1;
 	}
 	lua_pushnil(L);
-	lua_replace(L, 1); // Replace traceback function with nil
+	lua_replace(L, 1);
 	return lua_gettop(L);
 }
 SG_LUA_CPP_FUN_END()
+#endif
 
 static int l_PCall(lua_State* L)
 {
@@ -2179,14 +2190,21 @@ int ui_main_c::InitAPI(lua_State* L)
 		lua_getfield(L, -1, "path");
 		std::string old_path = lua_tostring(L, -1);
 		lua_pop(L, 1);
-		old_path += ";lua/?.lua";
+		old_path += ";lua/?.lua;lua/?/init.lua";
 #if __APPLE__ && __MACH__
 		// Dev layout: host in runtime-macos/, shared scripts in ../runtime/lua/ (see PoB #8).
-		auto runtime_lua = (ui->sys->basePath / ".." / "runtime" / "lua" / "?.lua").lexically_normal();
-		old_path += ";" + runtime_lua.generic_string();
+		auto runtime_lua_dir = (ui->sys->basePath / ".." / "runtime" / "lua").lexically_normal();
+		old_path += ";" + (runtime_lua_dir / "?.lua").generic_string();
+		old_path += ";" + (runtime_lua_dir / "?" / "init.lua").generic_string();
 #endif
 		lua_pushstring(L, old_path.c_str());
 		lua_setfield(L, -2, "path");
+		lua_getfield(L, -1, "cpath");
+		std::string old_cpath = lua_tostring(L, -1);
+		lua_pop(L, 1);
+		old_cpath += ";" + (ui->sys->basePath / "?.so").generic_string();
+		lua_pushstring(L, old_cpath.c_str());
+		lua_setfield(L, -2, "cpath");
 		lua_pop(L, 1);
 	}
 
@@ -2285,7 +2303,6 @@ int ui_main_c::InitAPI(lua_State* L)
 	ADDFUNC(DrawStringCursorIndex);
 	ADDFUNC(StripEscapes);
 	ADDFUNC(GetAsyncCount);
-	ADDFUNC(RenderInit);
 
 	// Search handles
 	lua_newtable(L);	// Search handle metatable
@@ -2327,9 +2344,37 @@ int ui_main_c::InitAPI(lua_State* L)
 	ADDFUNC(LaunchSubScript);
 	ADDFUNC(AbortSubScript);
 	ADDFUNC(IsSubScriptRunning);
+#if !(__APPLE__ && __MACH__)
 	ADDFUNC(LoadModule);
 	ADDFUNC(PLoadModule);
+#endif
 	ADDFUNC(PCall);
+#if __APPLE__ && __MACH__
+	{
+		ui_main_c* ui = GetUIPtr(L);
+		// Avoid nested C lua_call/lua_pcall from module loaders under OnInit (#8).
+		static char const* const kMacModuleLoaders =
+			"local function __loadfile(fileName)\n"
+			"  if not fileName:match('%.lua$') then fileName = fileName .. '.lua' end\n"
+			"  return loadfile(fileName)\n"
+			"end\n"
+			"function LoadModule(fileName, ...)\n"
+			"  local func, err = __loadfile(fileName)\n"
+			"  if not func then error(\"LoadModule() error loading '\"..fileName..\"': \"..err, 2) end\n"
+			"  return func(...)\n"
+			"end\n"
+			"function PLoadModule(fileName, ...)\n"
+			"  local func, err = __loadfile(fileName)\n"
+			"  if not func then return err end\n"
+			"  local results = { func(...) }\n"
+			"  if #results == 0 then return nil end\n"
+			"  return nil, unpack(results)\n"
+			"end\n";
+		if (luaL_dostring(L, kMacModuleLoaders) != LUA_OK) {
+			ui->sys->Error("Error initialising module loaders: %s\n", lua_tostring(L, -1));
+		}
+	}
+#endif
 	lua_getglobal(L, "string");
 	lua_getfield(L, -1, "format");
 	ADDFUNCCL(ConPrintf, 1);

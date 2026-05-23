@@ -680,6 +680,9 @@ void sys_video_c::SetForeground()
 
 bool sys_video_c::IsActive()
 {
+	if (!initialised || !wnd) {
+		return false;
+	}
 	return glfwGetWindowAttrib(wnd, GLFW_FOCUSED);
 }
 
