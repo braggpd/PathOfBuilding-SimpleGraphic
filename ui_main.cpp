@@ -152,25 +152,38 @@ void ui_main_c::PCall(int narg, int nret)
 	inLua = true;
 	hasActiveCoroutine = false;
 	int err = lua_pcall(L, narg, nret, 1);
-	lua_getglobal(L, "coroutine");
-	lua_getfield(L, -1, "_list");
-	lua_pcall(L, 0, 1, 0);
-
-	if (lua_istable(L, -1)) {
-		lua_pushnil(L);
-		while (lua_next(L, -2)) {
-			lua_State* co = lua_tothread(L, -2);
-			if (co && lua_status(co) == LUA_YIELD) {
-				hasActiveCoroutine = true;
+	if (err == 0) {
+		lua_getglobal(L, "coroutine");
+		lua_getfield(L, -1, "_list");
+		// PoB defines coroutine._list in Modules/Common.lua (after Main loads). Before that, skip.
+		if (lua_isfunction(L, -1)) {
+			if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+				lua_pop(L, 1);
 			}
-			lua_pop(L, 1);
+		} else {
+			lua_pop(L, 2);
 		}
+
+		if (lua_istable(L, -1)) {
+			lua_pushnil(L);
+			while (lua_next(L, -2)) {
+				lua_State* co = lua_tothread(L, -2);
+				if (co && lua_status(co) == LUA_YIELD) {
+					hasActiveCoroutine = true;
+				}
+				lua_pop(L, 1);
+			}
+		}
+		lua_pop(L, 2);
 	}
-	lua_pop(L, 2);
 	inLua = false;
 	sys->SetWorkDir();
 	if (err && !didExit) {
-		DoError("Runtime error in", lua_tostring(L, -1));
+		const char* msg = lua_tostring(L, -1);
+		if (!msg) {
+			msg = lua_typename(L, lua_type(L, -1));
+		}
+		DoError("Runtime error in", msg);
 	}
 }
 
