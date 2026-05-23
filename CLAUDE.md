@@ -27,7 +27,7 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
 
-**Next up:** Phase 2 — runtime integration (PoB dev-mode launch on macOS).
+**Phase 2 — runtime integration** (in progress): [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6) engine layout merged to `macos-port`; **[#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) blocked on SIGBUS** during `Launch.lua` — see `MACOS_PORT.md` “Next session — close #8”.
 
 ## Key architectural decisions (do not revisit without discussion)
 
@@ -52,6 +52,16 @@ cmake -B build -S . \
   -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build --config Release
 ```
+
+## Implementation specs
+
+Detailed per-issue execution specs live in `docs/macos/`. Each spec contains the
+exact files to create/modify, the exact content, key decisions, and a verification
+checklist. Always check for a spec before starting work on an issue.
+
+| Issue | Spec |
+|---|---|
+| #6 runtime-macos layout | `docs/macos/issue-6-runtime-layout.md` |
 
 **LuaJIT-only verify** (Phase 1.2 — classic manifest install of one port):
 

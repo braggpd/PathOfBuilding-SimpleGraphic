@@ -110,7 +110,7 @@ compiled for macOS and the CI is Windows-only.
 
 ### Tasks
 
-- [ ] **2.1** Define macOS runtime layout in the PoB-PoE2 fork · [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)
+- [ ] **2.1** Define macOS runtime layout in the PoB-PoE2 fork · [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6) · [spec](docs/macos/issue-6-runtime-layout.md)
 
   Windows layout (existing):
   ```
