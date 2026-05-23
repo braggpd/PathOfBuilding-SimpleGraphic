@@ -36,3 +36,18 @@ foreach (_dep IN LISTS _resolved)
         message(STATUS "Bundled runtime: ${_dep_name}")
     endif ()
 endforeach ()
+
+# GLFW's EGL loader looks for libEGL.dylib / libGLESv2.dylib; vcpkg ANGLE uses liblib*_angle.dylib.
+foreach (_pair IN ITEMS
+    "libEGL.dylib;liblibEGL_angle.dylib"
+    "libGLESv2.dylib;liblibGLESv2_angle.dylib"
+)
+    list(GET _pair 0 _egl_link)
+    list(GET _pair 1 _egl_target)
+    set(_egl_target_path "${_install_prefix}/${_egl_target}")
+    set(_egl_link_path "${_install_prefix}/${_egl_link}")
+    if (EXISTS "${_egl_target_path}" AND NOT EXISTS "${_egl_link_path}")
+        file(CREATE_LINK "${_egl_target}" "${_egl_link_path}" SYMBOLIC)
+        message(STATUS "EGL alias: ${_egl_link} -> ${_egl_target}")
+    endif ()
+endforeach ()
