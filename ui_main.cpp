@@ -361,7 +361,7 @@ void ui_main_c::ScriptInit()
 	
 	// Load the script file
 	sys->SetWorkDir(scriptWorkDir);
- 	err = luaL_loadfile(L, scriptName.filename().generic_u8string().c_str());
+	err = luaL_loadfile(L, scriptName.generic_u8string().c_str());
 	if (err) {
 		DoError("Error loading", lua_tostring(L, -1));
 		return;
