@@ -2174,12 +2174,17 @@ int ui_main_c::InitAPI(lua_State* L)
 
 	// Add "lua/" subdir for non-JIT Lua
 	{
+		ui_main_c* ui = GetUIPtr(L);
 		lua_getglobal(L, "package");
-		char const* tn = lua_typename(L, -1);
 		lua_getfield(L, -1, "path");
 		std::string old_path = lua_tostring(L, -1);
 		lua_pop(L, 1);
 		old_path += ";lua/?.lua";
+#if __APPLE__ && __MACH__
+		// Dev layout: host in runtime-macos/, shared scripts in ../runtime/lua/ (see PoB #8).
+		auto runtime_lua = (ui->sys->basePath / ".." / "runtime" / "lua" / "?.lua").lexically_normal();
+		old_path += ";" + runtime_lua.generic_string();
+#endif
 		lua_pushstring(L, old_path.c_str());
 		lua_setfield(L, -2, "path");
 		lua_pop(L, 1);

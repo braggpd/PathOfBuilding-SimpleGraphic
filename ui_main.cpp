@@ -157,24 +157,23 @@ void ui_main_c::PCall(int narg, int nret)
 		lua_getfield(L, -1, "_list");
 		// PoB defines coroutine._list in Modules/Common.lua (after Main loads). Before that, skip.
 		if (lua_isfunction(L, -1)) {
-			if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-				lua_pop(L, 1);
+			lua_remove(L, -2);  // drop coroutine table; stack: errfunc, _list()
+			if (lua_pcall(L, 0, 1, 0) == LUA_OK && lua_istable(L, -1)) {
+				lua_pushnil(L);
+				while (lua_next(L, -2)) {
+					lua_State* co = lua_tothread(L, -2);
+					if (co && lua_status(co) == LUA_YIELD) {
+						hasActiveCoroutine = true;
+					}
+					lua_pop(L, 1);
+				}
+				lua_pop(L, 1);  // active_coroutines table
+			} else {
+				lua_pop(L, 1);  // _list error or non-table result
 			}
 		} else {
-			lua_pop(L, 2);
+			lua_pop(L, 2);  // coroutine table + nil _list
 		}
-
-		if (lua_istable(L, -1)) {
-			lua_pushnil(L);
-			while (lua_next(L, -2)) {
-				lua_State* co = lua_tothread(L, -2);
-				if (co && lua_status(co) == LUA_YIELD) {
-					hasActiveCoroutine = true;
-				}
-				lua_pop(L, 1);
-			}
-		}
-		lua_pop(L, 2);
 	}
 	inLua = false;
 	sys->SetWorkDir();
@@ -184,6 +183,9 @@ void ui_main_c::PCall(int narg, int nret)
 			msg = lua_typename(L, lua_type(L, -1));
 		}
 		DoError("Runtime error in", msg);
+	} else if (!err && lua_gettop(L) > 1 && lua_isfunction(L, 1)) {
+		// PCall leaves the traceback handler at index 1; drop stray stack values.
+		lua_settop(L, 1);
 	}
 }
 
