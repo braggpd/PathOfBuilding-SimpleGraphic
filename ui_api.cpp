@@ -237,15 +237,20 @@ static int l_SetCallback(lua_State* L)
 	int n = lua_gettop(L);
 	ui->LAssert(L, n >= 1, "Usage: SetCallback(name[, func])");
 	ui->LAssert(L, lua_isstring(L, 1), "SetCallback() argument 1: expected string, got %s", luaL_typename(L, 1));
-	lua_pushvalue(L, 1);
 	if (n >= 2) {
 		ui->LAssert(L, lua_isfunction(L, 2) || lua_isnil(L, 2), "SetCallback() argument 2: expected function or nil, got %s", luaL_typename(L, 2));
-		lua_pushvalue(L, 2);
 	}
-	else {
-		lua_pushnil(L);
-	}
+#if __APPLE__ && __MACH__
+	lua_getfield(L, LUA_REGISTRYINDEX, "uicallbacks");
+	lua_pushvalue(L, 1);
+	if (n >= 2) { lua_pushvalue(L, 2); } else { lua_pushnil(L); }
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+#else
+	lua_pushvalue(L, 1);
+	if (n >= 2) { lua_pushvalue(L, 2); } else { lua_pushnil(L); }
 	lua_settable(L, lua_upvalueindex(1));
+#endif
 	return 0;
 }
 
@@ -255,8 +260,15 @@ static int l_GetCallback(lua_State* L)
 	int n = lua_gettop(L);
 	ui->LAssert(L, n >= 1, "Usage: GetCallback(name)");
 	ui->LAssert(L, lua_isstring(L, 1), "GetCallback() argument 1: expected string, got %s", luaL_typename(L, 1));
+#if __APPLE__ && __MACH__
+	lua_getfield(L, LUA_REGISTRYINDEX, "uicallbacks");
+	lua_pushvalue(L, 1);
+	lua_rawget(L, -2);
+	lua_remove(L, -2);
+#else
 	lua_pushvalue(L, 1);
 	lua_gettable(L, lua_upvalueindex(1));
+#endif
 	return 1;
 }
 
@@ -264,15 +276,20 @@ static int l_SetMainObject(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	int n = lua_gettop(L);
-	lua_pushstring(L, "MainObject");
 	if (n >= 1) {
 		ui->LAssert(L, lua_istable(L, 1) || lua_isnil(L, 1), "SetMainObject() argument 1: expected table or nil, got %s", luaL_typename(L, 1));
-		lua_pushvalue(L, 1);
 	}
-	else {
-		lua_pushnil(L);
-	}
+#if __APPLE__ && __MACH__
+	lua_getfield(L, LUA_REGISTRYINDEX, "uicallbacks");
+	lua_pushstring(L, "MainObject");
+	if (n >= 1) { lua_pushvalue(L, 1); } else { lua_pushnil(L); }
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+#else
+	lua_pushstring(L, "MainObject");
+	if (n >= 1) { lua_pushvalue(L, 1); } else { lua_pushnil(L); }
 	lua_settable(L, lua_upvalueindex(1));
+#endif
 	return 0;
 }
 
@@ -322,7 +339,11 @@ SG_LUA_CPP_FUN_BEGIN(NewArtHandle)
 	artHandle_s* artHandle = (artHandle_s*)lua_newuserdata(L, sizeof(artHandle_s));
 	new(artHandle) artHandle_s();
 	artHandle->img = std::move(img);
+#if __APPLE__ && __MACH__
+	lua_getfield(L, LUA_REGISTRYINDEX, "uiarthandlemeta");
+#else
 	lua_pushvalue(L, lua_upvalueindex(1));
+#endif
 	lua_setmetatable(L, -2);
 	return 1;
 }
@@ -367,7 +388,11 @@ static int l_NewImageHandle(lua_State* L)
 {
 	imgHandle_s* imgHandle = (imgHandle_s*)lua_newuserdata(L, sizeof(imgHandle_s));
 	imgHandle->hnd = NULL;
+#if __APPLE__ && __MACH__
+	lua_getfield(L, LUA_REGISTRYINDEX, "uiimghandlemeta");
+#else
 	lua_pushvalue(L, lua_upvalueindex(1));
+#endif
 	lua_setmetatable(L, -2);
 	return 1;
 }
@@ -1381,7 +1406,11 @@ SG_LUA_CPP_FUN_BEGIN(NewFileSearch)
 	searchHandle_s* searchHandle = (searchHandle_s*)lua_newuserdata(L, sizeof(searchHandle_s));
 	searchHandle->find = find;
 	searchHandle->dirOnly = dirOnly;
+#if __APPLE__ && __MACH__
+	lua_getfield(L, LUA_REGISTRYINDEX, "uisearchhandlemeta");
+#else
 	lua_pushvalue(L, lua_upvalueindex(1));
+#endif
 	lua_setmetatable(L, -2);
 	return 1;
 }
@@ -2158,8 +2187,15 @@ static int l_ConPrintf(lua_State* L)
 	int n = lua_gettop(L);
 	ui->LAssert(L, n >= 1, "Usage: ConPrintf(fmt[, ...])");
 	ui->LAssert(L, lua_isstring(L, 1), "ConPrintf() argument 1: expected string, got %s", luaL_typename(L, 1));
+#if __APPLE__ && __MACH__
+	lua_getglobal(L, "string");
+	lua_getfield(L, -1, "format");
+	lua_remove(L, n + 1);	// drop "string" table, keep "string.format" at n+1
+	lua_insert(L, 1);		// move string.format to front
+#else
 	lua_pushvalue(L, lua_upvalueindex(1));	// string.format
 	lua_insert(L, 1);
+#endif
 	lua_call(L, n, 1);
 	ui->LAssert(L, lua_isstring(L, 1), "ConPrintf() error: string.format returned non-string");
 	ui->sys->con->Printf("%s\n", lua_tostring(L, 1));
@@ -2387,18 +2423,28 @@ int ui_main_c::InitAPI(lua_State* L)
 
 	// Callbacks
 	lua_newtable(L);		// Callbacks table
+#if __APPLE__ && __MACH__
+	lua_pushcfunction(L, l_SetCallback);  lua_setglobal(L, "SetCallback");
+	lua_pushcfunction(L, l_GetCallback);  lua_setglobal(L, "GetCallback");
+	lua_pushcfunction(L, l_SetMainObject); lua_setglobal(L, "SetMainObject");
+#else
 	lua_pushvalue(L, -1);	// Push callbacks table
 	ADDFUNCCL(SetCallback, 1);
 	lua_pushvalue(L, -1);	// Push callbacks table
 	ADDFUNCCL(GetCallback, 1);
 	lua_pushvalue(L, -1);	// Push callbacks table
 	ADDFUNCCL(SetMainObject, 1);
+#endif
 	lua_setfield(L, LUA_REGISTRYINDEX, "uicallbacks");
 
 	// Image handles
 	lua_newtable(L);		// Image handle metatable
+#if __APPLE__ && __MACH__
+	lua_pushcfunction(L, l_NewImageHandle); lua_setglobal(L, "NewImageHandle");
+#else
 	lua_pushvalue(L, -1);	// Push image handle metatable
 	ADDFUNCCL(NewImageHandle, 1);
+#endif
 	lua_pushvalue(L, -1);	// Push image handle metatable
 	lua_setfield(L, -2, "__index");
 	lua_pushcfunction(L, l_imgHandleGC);
@@ -2423,8 +2469,12 @@ int ui_main_c::InitAPI(lua_State* L)
 
 	// Art handles
 	lua_newtable(L);		// Art handle metatable
+#if __APPLE__ && __MACH__
+	lua_pushcfunction(L, l_NewArtHandle); lua_setglobal(L, "NewArtHandle");
+#else
 	lua_pushvalue(L, -1);	// Push art handle metatable
 	ADDFUNCCL(NewArtHandle, 1);
+#endif
 	lua_pushvalue(L, -1);	// Push art handle metatable
 	lua_setfield(L, -2, "__index");
 	lua_pushcfunction(L, l_artHandleGC);
@@ -2483,8 +2533,12 @@ int ui_main_c::InitAPI(lua_State* L)
 
 	// Search handles
 	lua_newtable(L);	// Search handle metatable
+#if __APPLE__ && __MACH__
+	lua_pushcfunction(L, l_NewFileSearch); lua_setglobal(L, "NewFileSearch");
+#else
 	lua_pushvalue(L, -1);	// Push search handle metatable
 	ADDFUNCCL(NewFileSearch, 1);
+#endif
 	lua_pushvalue(L, -1);	// Push search handle metatable
 	lua_setfield(L, -2, "__index");
 	lua_pushcfunction(L, l_searchHandleGC);
@@ -2528,10 +2582,14 @@ int ui_main_c::InitAPI(lua_State* L)
 	lua_setglobal(L, "__mac_pload_c");
 #endif
 	ADDFUNC(PCall);
+#if __APPLE__ && __MACH__
+	lua_pushcfunction(L, l_ConPrintf); lua_setglobal(L, "ConPrintf");
+#else
 	lua_getglobal(L, "string");
 	lua_getfield(L, -1, "format");
 	ADDFUNCCL(ConPrintf, 1);
 	lua_pop(L, 1);		// Pop 'string' table
+#endif
 	ADDFUNC(ConPrintTable);
 	ADDFUNC(ConExecute);
 	ADDFUNC(ConClear);
