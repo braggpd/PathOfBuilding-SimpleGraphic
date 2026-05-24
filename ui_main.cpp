@@ -88,6 +88,35 @@ static int l_mac_xpcall(lua_State* L) {
     return 2;
 }
 
+// Call func+args on a helper coroutine (lua_resume). Replaces lua_call from LIGHTFUNCs. (#8)
+static void mac_resume_call(lua_State* L, int nargs, int nresults) {
+    const int func = lua_gettop(L) - nargs;
+    lua_State* co = lua_newthread(L);
+    lua_pushvalue(L, func);
+    for (int i = 1; i <= nargs; i++) {
+        lua_pushvalue(L, func + i);
+    }
+    lua_xmove(L, co, nargs + 1);
+    lua_pop(L, 1); // drop thread handle
+    lua_settop(L, func - 1); // drop func and args from parent stack
+
+    const int status = lua_resume(co, nullptr, nargs);
+    if (status != 0) {
+        if (lua_gettop(co) > 0) {
+            lua_xmove(co, L, 1);
+        } else {
+            lua_pushliteral(L, "error in require loader");
+        }
+        lua_error(L);
+    }
+    const int got = lua_gettop(co);
+    const int want = (nresults == LUA_MULTRET) ? got : nresults;
+    lua_xmove(co, L, want);
+    for (int i = got; i < want; i++) {
+        lua_pushnil(L);
+    }
+}
+
 // Light C function replacement for LuaJIT built-in require().
 // LuaJIT 2.1 arm64 interpreter crashes when Lua bytecode calls any GC C closure
 // via GGET+CALL (e.g. require, which has upvalues → allocated as CClosure).
@@ -114,7 +143,7 @@ static int l_mac_require(lua_State* L) {
     lua_getfield(L, 4, modname);
     if (lua_isfunction(L, -1)) {
         lua_pushvalue(L, 1);            // pass modname as arg
-        lua_call(L, 1, 1);             // loader(modname) → result
+        mac_resume_call(L, 1, 1);       // loader(modname) → result
         if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
         lua_pushvalue(L, -1);
         lua_setfield(L, 3, modname);   // package.loaded[modname] = result
@@ -142,8 +171,9 @@ static int l_mac_require(lua_State* L) {
         size_t q = tmpl.find('?');
         if (q != std::string::npos) tmpl.replace(q, 1, modpath);
         if (luaL_loadfile(L, tmpl.c_str()) == LUA_OK) {
-            lua_pushvalue(L, 1);
-            lua_call(L, 1, 1);
+            // PoB/runtime modules ignore the require() module name; passing it triggers
+            // arm64 LuaJIT faults when invoking the chunk from a LIGHTFUNC. (#8)
+            mac_resume_call(L, 0, 1);
             if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
             lua_pushvalue(L, -1);
             lua_setfield(L, 3, modname);
