@@ -122,6 +122,14 @@ static void mac_resume_call(lua_State* L, int nargs, int nresults) {
 // via GGET+CALL (e.g. require, which has upvalues → allocated as CClosure).
 // Replacing it with a LIGHTFUNC (no GC allocation) and calling all loaders via
 // the C API avoids the broken interpreter path entirely. (#8)
+static int mac_require_return_loaded(lua_State* L, int loadedIdx, const char* modname) {
+    // Stack has [modname, package, loaded, preload, ...]. Leave only the module at index 1.
+    lua_getfield(L, loadedIdx, modname);
+    lua_replace(L, 1);
+    lua_settop(L, 1);
+    return 1;
+}
+
 static int l_mac_require(lua_State* L) {
     const char* modname = luaL_checkstring(L, 1);
     lua_settop(L, 1);  // [1]=modname
@@ -133,10 +141,15 @@ static int l_mac_require(lua_State* L) {
     if (!lua_istable(L, -1))
         luaL_error(L, "l_mac_require: 'package.loaded' is %s (expected table)", luaL_typename(L, -1));
     lua_getfield(L, 2, "preload");     // [1,2,3,4]  4=preload
+    const int loadedIdx = 3;
 
     // 1. Return immediately if already loaded.
-    lua_getfield(L, 3, modname);
-    if (!lua_isnil(L, -1)) return 1;
+    lua_getfield(L, loadedIdx, modname);
+    if (!lua_isnil(L, -1)) {
+        lua_replace(L, 1);
+        lua_settop(L, 1);
+        return 1;
+    }
     lua_pop(L, 1);
 
     // 2. Call package.preload[modname] if present.
@@ -146,8 +159,8 @@ static int l_mac_require(lua_State* L) {
         mac_resume_call(L, 1, 1);       // loader(modname) → result
         if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
         lua_pushvalue(L, -1);
-        lua_setfield(L, 3, modname);   // package.loaded[modname] = result
-        return 1;
+        lua_setfield(L, loadedIdx, modname);   // package.loaded[modname] = result
+        return mac_require_return_loaded(L, loadedIdx, modname);
     }
     lua_pop(L, 1);
 
@@ -176,8 +189,8 @@ static int l_mac_require(lua_State* L) {
             mac_resume_call(L, 0, 1);
             if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
             lua_pushvalue(L, -1);
-            lua_setfield(L, 3, modname);
-            return 1;
+            lua_setfield(L, loadedIdx, modname);
+            return mac_require_return_loaded(L, loadedIdx, modname);
         }
         tried += "\n\tno file '"; tried += tmpl; tried += "'";
         lua_pop(L, 1);  // pop load error
