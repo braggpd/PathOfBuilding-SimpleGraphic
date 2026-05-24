@@ -16,7 +16,7 @@ This fork's sole purpose is porting the SimpleGraphic C++ engine to native macOS
 SimpleGraphic is a shared library (.dylib on macOS) that hosts LuaJIT and provides a GLFW window + ANGLE-based 2D renderer. The Lua game logic (~99% of PoB) is in a separate repo and requires no macOS changes.
 
 ## Key decisions already made
-- **LuaJIT**: v2.1 beta via vcpkg overlay `luajit` port — **JIT enabled on arm64** (Phase 1.2 verified). Do not switch Lua runtime without filing an issue first.
+- **LuaJIT**: v2.1 beta via vcpkg overlay `luajit` port — **JIT disabled in PoB host** (`jit.off()` in `ScriptInit`) until launch stable; standalone `luajit` still JIT-capable. Do not switch Lua runtime without filing an issue first.
 - **Graphics**: ANGLE with Metal backend. Do not switch to native OpenGL unless ANGLE proves unworkable (document in issue #5 if so).
 - **Deployment target**: macOS 13.0. Do not lower this.
 - **vcpkg triplet**: `arm64-osx` in `triplets/arm64-osx.cmake` (libc++ `-isystem` fix for Apple Clang).
@@ -27,9 +27,14 @@ SimpleGraphic is a shared library (.dylib on macOS) that hosts LuaJIT and provid
 Every task has a GitHub Issue. Before starting work, check [open issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen) and assign yourself. Branch naming: `macos/issue-N-short-description`.
 
 Current phase: **Phase 2** — runtime integration on `macos-port`. **Phase 1 #1–#5 complete**;
-**#6 engine work merged**. **#8 in progress:** SIGBUS after `Running script...` — follow
-`MACOS_PORT.md` section **Next session — close #8** (bisect Launch.lua, `luaL_loadfile` full path, lldb).
+**#6 engine work merged**. **#8 in progress:** `Launch_oninit_only.lua` passes; **segfault on
+`PLoadModule("Modules/Main")` → `Modules/Common.lua`**. Follow `MACOS_PORT.md` → **Next session — close #8**
+(bisect Common.lua `require`s; `cmake --install` to PoB `runtime-macos`). Tip: `origin/macos-port` @ `26dc2b1`.
 Spec: `docs/macos/issue-6-runtime-layout.md`.
+
+**macOS engine fixes already on branch:** Lua `LoadModule`/`PLoadModule` (no nested C `lua_call` under `OnInit`);
+`package.path`/`package.cpath`; null guards (`IsActive`, `KeyEvent`, `glfwWindowShouldClose`); full-path `luaL_loadfile`;
+`jit.off()` in host. Do not use `print()` in bisect scripts — use `ConPrintf`.
 
 ## macOS build command
 ```bash
@@ -38,7 +43,11 @@ cmake -B build -S . \
   -DVCPKG_TARGET_TRIPLET=arm64-osx \
   -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build --config Release
+cmake --install build --prefix ~/PoB-PoE2-build/runtime-macos
 ```
+
+PoB dev launch (from PoB repo root): `ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic` then
+`./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua`. Staged: `Launch_oninit_only.lua` (OK), `Launch_oninit_pload.lua` (Common load).
 
 ## LuaJIT smoke test (after vcpkg install)
 ```bash

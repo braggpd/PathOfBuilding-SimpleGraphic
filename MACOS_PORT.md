@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — JIT disabled in engine; Launch.lua still faults in top-level chunk)*
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — top-level chunk + OnInit OK; segfault loading `Modules/Common.lua`)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2
@@ -150,8 +150,11 @@ compiled for macOS and the CI is Windows-only.
   script (matching Windows host behaviour).
 
   **JIT:** `ui_main.cpp` calls `jit.off()` and stubs `jit.opt.start` before loading the
-  script (Launch.lua re-enables JIT otherwise). Full Launch.lua still hits `EXC_BAD_ACCESS`
-  in `libluajit` during the top-level chunk — further investigation needed.
+  script (Launch.lua calls `jit.opt.start` at top level; stub is a no-op on macOS).
+
+  **Progress (2026-05-23):** `Launch_oninit_only.lua` exits 0 (`OnInit` + `require("xml")`).
+  `RenderInit` succeeds. `PLoadModule("GameVersions")` works. Segfault remains when
+  `PLoadModule("Modules/Main")` loads `Modules/Common.lua` (not the top-level Launch chunk).
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 
@@ -161,84 +164,104 @@ compiled for macOS and the CI is Windows-only.
 
 ### Next session — close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) (dev launch)
 
-**Branch:** `macos-port` (`macos/issue-6-runtime-layout` merged 2026-05-22).
+**Branch:** `macos/issue-8-sync-smoke-merge` (`sync-smoke` merged into `macos-port`; PR when stable).
 
-**Merged to `macos-port` (engine #6 / launch prep #8):**
+**Engine fixes landed on `macos-port` (closes most early #8 crashes):**
 
-- `runtime-macos/` install layout + `pob-host` launcher ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6))
-- macOS argv shift, `launchCwd`, `jit.off()` + `jit.opt.start` stub ([#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8))
-- Launch reaches `Running script...` with correct `Script: .../src/Launch.lua` path
+| Area | Fix |
+|------|-----|
+| Script load | `luaL_loadfile` uses full resolved `scriptName` path (`ui_main.cpp`) |
+| `PCall` / coroutine | Skip `coroutine._list` when nil; fix stack after `PCall` |
+| EGL / GLFW | `libEGL.dylib` / `libGLESv2.dylib` symlinks in `runtime-macos/` (`macos_bundle_runtime.cmake`) |
+| Window | `glfwWindowShouldClose(nullptr)` guard; `IsActive()` null `wnd` guard |
+| Input | `conUI` / `renderer` null checks in `KeyEvent` |
+| Lua paths | `package.path` + `runtime/lua/?/init.lua`; `package.cpath` → `basePath/?.so` |
+| Module load | macOS **Lua** `LoadModule` / `PLoadModule` via `loadfile` + `func(...)` (avoids nested C `lua_call` / `lua_pcall` under `OnInit`) |
+| JIT / builtins | JIT on; stub `jit.opt.start`; LIGHTFUNC `require`/`pcall`/`xpcall`; `dlopen` preload |
 
-**Blocker:** process exits with **SIGBUS (exit 138)** during/after top-level `Launch.lua`.
-lldb (pre–`jit.off` stub): `EXC_BAD_ACCESS` in `libluajit-5.1.2.1.0.dylib`. Isolation:
-`ConExecute` / `SetWindowTitle` likely OK; full Launch still faults.
+**What passes today (PoB dev clone `~/PoB-PoE2-build`):**
+
+| Test | Result |
+|------|--------|
+| `./src/Launch_oninit_only.lua` | Exit 0 — `OnInit OK`, `xml OK` |
+| `RenderInit("DPI_AWARE")` | Renderer initialises |
+| `PLoadModule("GameVersions")` (statement) | OK |
+| `LoadModule("GameVersions")` + `require("xml")` | OK |
+
+**Current blockers:** (1) **multi-assign** on arm64 LuaJIT (`local a,b = …` / `a,b = f()`)
+segfaults with `jit.off()`; PoB `Launch.lua` line 71 needs `errMsg, self.main = PLoadModule(...)`.
+(2) **`sha1`** — lazy-init precalc in PoB `runtime/lua/sha1/init.lua` ([#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9)).
+(3) **`l_mac_pcall`** — try `lua_resume` if LIGHTFUNC return still faults.
 
 **Success criterion (unchanged):** UI renders, passive tree loads, basic calculations run.
 
-#### Step 1 — Rebuild and sync (every session)
+#### Step 1 — Rebuild and install (every session)
+
+Use a **space-free** build worktree (`~/PoB-SimpleGraphic-build`). Install the full
+`runtime-macos` bundle (not only `cp` of the host + one dylib).
 
 ```bash
-# Build (space-free worktree)
 cd ~/PoB-SimpleGraphic-build
-git fetch origin macos-port && git checkout macos-port
-./vcpkg/downloads/tools/ninja-1.13.2-osx/ninja -C build
-cp build/libSimpleGraphic.dylib build/"Path of Building-PoE2" ~/PoB-PoE2-build/runtime-macos/
+git fetch origin && git reset --hard origin/macos/issue-8-sync-smoke-merge
 
-# Launch from PoB repo root (not runtime-macos/)
+VCPKG_CMAKE="$(pwd)/vcpkg/downloads/tools/cmake-3.31.10-osx/cmake-3.31.10-macos-universal/CMake.app/Contents/bin/cmake"
+NINJA="$(pwd)/vcpkg/downloads/tools/ninja-1.13.2-osx/ninja"
+
+"$NINJA" -C build
+"$VCPKG_CMAKE" --install build --prefix ~/PoB-PoE2-build/runtime-macos
+
+# Optional EGL aliases if install script did not create them:
+cd ~/PoB-PoE2-build/runtime-macos
+ln -sf liblibEGL_angle.dylib libEGL.dylib
+ln -sf liblibGLESv2_angle.dylib libGLESv2.dylib
+```
+
+#### Step 2 — Dev launch and staged tests
+
+```bash
 cd ~/PoB-PoE2-build
 ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic
+
+./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_only.lua
+./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_pload.lua   # expect progress past segfault
 ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
 ```
 
-Expect log line: `LuaJIT JIT disabled on macOS (interpreter mode).`
+Expect: `LuaJIT JIT disabled on macOS (interpreter mode).`  
+First full `Launch.lua` load may take **1–3 minutes** in interpreter mode.
 
-#### Step 2 — Engine fix: `luaL_loadfile` full path
+#### Step 3 — Bisect `Modules/Common.lua` (current blocker)
 
-In `ui_main.cpp` `ScriptInit()`, change load from `scriptName.filename()` to the full
-resolved path (`scriptName.generic_u8string()`). Required for bisection scripts and
-correct behaviour when `scriptName` is absolute.
+In PoB `src/`, bisect `require()` in `Modules/Common.lua` (after `GameVersions` loads):
 
-#### Step 3 — Bisect SIGBUS (find faulting line)
+1. `require("lcurl.safe")` — needs `lcurl.so` on `package.cpath` (engine sets `runtime-macos/?.so`)
+2. `require("sha1")` — needs `runtime/lua/sha1/init.lua` on `package.path`
 
-Copy `src/Launch.lua` → `src/Launch_bisect.lua` in PoB repo; trim top-level lines and
-re-run host with `./src/Launch_bisect.lua`:
-
-| Stage | Include |
-|-------|---------|
-| A | Lines 1–13 (`SetWindowTitle`, `ConExecute` vid_mode/resizable) |
-| B | + `SetMainObject(launch)` |
-| C | + `collectgarbage("setpause", 400)` |
-| D | Full file (engine then calls `launch:OnInit()`) |
-
-If A–C pass but D fails → debug **`launch:OnInit()`** (`require("xml")`, `RenderInit`,
-`PLoadModule("Modules/Main")`), not packaging or argv.
-
-#### Step 4 — lldb backtrace (one run)
+Use small `Launch_*.lua` scripts under `src/` (local only, not committed) or lldb:
 
 ```bash
-cd ~/PoB-PoE2-build
 lldb ./runtime-macos/"Path of Building-PoE2"
-settings set target.run-args ./src/Launch.lua
+settings set target.run-args ./src/Launch_oninit_pload.lua
 run
 bt
 ```
 
-Do not pipe through `head` while the GUI runs; use `bt` after stop or crash.
+#### Step 4 — Notes for debugging
 
-#### Step 5 — Optional: macOS `print()` (`ui_api.cpp` `l_print`)
+- Avoid `print()` in test scripts — use `ConPrintf`; macOS `l_print` can fault.
+- `local err, x = PLoadModule(...)` and statement `PLoadModule(...)` both fault on **Main**;
+  issue is **Common.lua load**, not only multi-return assignment.
+- PoB bisect scripts (`Launch_bisect_*.lua`, `Launch_oninit_pload.lua`, etc.) live only in
+  `~/PoB-PoE2-build/src/` unless copied into a future session.
 
-Minimal test scripts fail with `print() error: tostring returned non-string`. Helpful for
-bisection only; not required to close #8 if the UI launches.
-
-#### Step 6 — After #8 passes
+#### Step 5 — After #8 passes
 
 - [ ] Close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8); file Lua issues in [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9) if any
-- [x] Merge `macos/issue-6-runtime-layout` → `macos-port` (push when ready)
 - [ ] PoB fork: commit `runtime-macos/` layout + sync instructions ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6) on PoB repo)
 - [ ] Defer Phase 3–4 (.app, CI, signing) until dev launch is stable
 - [ ] Revisit LuaJIT JIT on arm64 only after stable launch (interpreter OK for now)
 
-**PoB clone path:** `~/PoB-PoE2-build` (dev branch). **Do not** build in a path containing spaces.
+**Paths:** engine clone `~/GitHub - Personal/PathOfBuilding-SimpleGraphic` (or any space-free worktree); build `~/PoB-SimpleGraphic-build`; PoB `~/PoB-PoE2-build`. **No spaces** in the engine build path.
 
 ---
 
@@ -442,20 +465,11 @@ Target command: `brew install --cask path-of-building-2`
 - **2026-05-22** — Merged `macos/issue-6-runtime-layout` → `macos-port`; aligned
   `docs/macos/issue-6-runtime-layout.md` with `macos_bundle_runtime.cmake` (Part B3) and
   clarified #6 enables but does not close #8.
-- **2026-05-23** — [#8] Two LuaJIT arm64 GC64 interpreter bugs identified and partially
-  fixed. **Bug #1** (fixed): interpreter CALL dispatch for GC C closures corrupts BASE in
-  GC64 mode (`ldur w16, [x21, #-0x4]`, x21 = GC64-tagged pointer). Fix: enable JIT (JIT
-  generates correct native code for GC function calls); replace `pcall`/`xpcall`/`require`
-  globals with C LIGHTFUNCs (`lua_pushcfunction`) so interpreter never does a GC-closure
-  CALL. Pre-register C extensions (`lcurl`, `lzip`, `lua-utf8`) in `package.preload` via
-  `dlopen`/`dlsym` at init time. Stub `jit.opt.start = function(...) end` to avoid its
-  broken interpreter path. **Bug #2** (pending): `lua_pcall` called from inside
-  `l_mac_pcall` (a LIGHTFUNC) completes successfully (rc=0), but the interpreter crashes
-  on return from the LIGHTFUNC. Root cause: `lua_pcall` modifies LuaJIT internal state
-  (likely GC64-encoded `L->base` in the cframe) in a way that corrupts the interpreter's
-  BASE register when `l_mac_pcall` returns. The crash is NOT inside `lua_pcall` itself and
-  NOT inside `l_mac_pcall`'s stack manipulation — it is in the interpreter's LIGHTFUNC
-  return-dispatch path. **Next fix to try**: replace `lua_pcall` inside `l_mac_pcall` with
-  `lua_resume` (coroutine-based protection), which uses entirely different internal stack
-  semantics and may not corrupt interpreter state. See `ui_main.cpp` `l_mac_pcall` for the
-  implementation to try next session.
+- **2026-05-23** — Pushed `26dc2b1` on `macos-port`: macOS Lua `LoadModule`/`PLoadModule`,
+  `package.path` + `package.cpath`, null window/input guards. Merged `sync-smoke` into
+  `macos/issue-8-sync-smoke-merge`: LIGHTFUNC `require`/`pcall`/`xpcall`, `dlopen` preload,
+  JIT on with `jit.opt.start` stub. **#8 progress:** segfault → Lua error on `sha1` precalc;
+  lazy-init xor tables in PoB `runtime/lua/sha1/init.lua` fixes `require("sha1")`.
+  **New blockers:** (1) LuaJIT arm64 **multi-assign** (`local a,b = …`) segfaults with
+  `jit.off()` (also on `26dc2b1`); PoB `Launch.lua` needs `errMsg, main = PLoadModule(...)`.
+  (2) `l_mac_pcall` LIGHTFUNC return — try `lua_resume` per `sync-smoke` notes.

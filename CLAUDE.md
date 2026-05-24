@@ -27,13 +27,13 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
 
-**Phase 2 — runtime integration** (in progress on `macos-port`): [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)/[#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7) engine work merged; **[#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) blocked on SIGBUS** during `Launch.lua` — see `MACOS_PORT.md` → **Next session — close #8**.
+**Phase 2 — runtime integration** (in progress on `macos-port`): [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)/[#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7) merged; **[#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)** — top-level `Launch.lua` chunk + `OnInit`/`RenderInit` pass in isolation; **segfault loading `Modules/Common.lua`** via `PLoadModule("Modules/Main")`. See `MACOS_PORT.md` → **Next session — close #8** (tip `26dc2b1` on `origin/macos-port`).
 
 ## Key architectural decisions (do not revisit without discussion)
 
 | Decision | Choice | Reason |
 |---|---|---|
-| LuaJIT on arm64 | v2.1 beta via vcpkg overlay port; **JIT enabled** on arm64 (verified 2026-05-22) | Custom `luajit` port builds for `arm64-osx`; acceptable perf for PoB |
+| LuaJIT on arm64 | v2.1 beta via vcpkg overlay port; **JIT off in PoB host** until launch stable | `jit.off()` + stub `jit.opt.start` in `ScriptInit` (`ui_main.cpp`); standalone `luajit` still JIT-capable |
 | Graphics API | ANGLE (Metal backend on macOS) | Matches Windows path; avoids rewriting renderer |
 | Min deployment target | macOS 13.0 (Ventura) | Covers all M-series hardware in active use |
 | vcpkg triplet | `arm64-osx` in `triplets/arm64-osx.cmake` | Overlay in `vcpkg-configuration.json`; adds libc++ `-isystem` for `-isysroot` builds |
@@ -51,7 +51,10 @@ cmake -B build -S . \
   -DVCPKG_TARGET_TRIPLET=arm64-osx \
   -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build --config Release
+cmake --install build --prefix /path/to/PoB/runtime-macos
 ```
+
+**PoB dev launch** (after install): symlink `runtime/SimpleGraphic` → `runtime-macos/SimpleGraphic`, run from PoB repo root. Staged tests: `Launch_oninit_only.lua` (passes), `Launch_oninit_pload.lua` (Common load — current blocker). Use space-free worktrees: `~/PoB-SimpleGraphic-build`, `~/PoB-PoE2-build`.
 
 ## Implementation specs
 
@@ -80,6 +83,8 @@ export DYLD_LIBRARY_PATH="$(pwd)/vcpkg/installed/arm64-osx/lib"
 | `engine/system/win/sys_main.cpp` | Platform entry, user data dir, thread/timer |
 | `engine/system/win/sys_macos.mm` | macOS-specific Obj-C++ implementations |
 | `engine/system/win/sys_video.cpp` | GLFW window + OpenGL context creation |
+| `ui_main.cpp` | Lua host: `ScriptInit`, `PCall`, macOS `jit.off()`, `OnInit` |
+| `ui_api.cpp` | Lua API; macOS `LoadModule`/`PLoadModule` via Lua `loadfile` |
 | `win/entry.cpp` | Windows DLL export `RunLuaFileAsWin` |
 | `mac/entry.cpp` | macOS `RunLuaFileAsWin` + `main()` (standalone dev launch) |
 | `triplets/arm64-osx.cmake` | vcpkg arm64-osx triplet definition |
