@@ -9,44 +9,82 @@
 #include <dlfcn.h>
 
 // Light C function replacements for LuaJIT built-ins whose interpreter fast-paths
-// are broken in GC64 mode on arm64. We use the C API lua_pcall (setjmp-based) which
-// is confirmed working, bypassing the broken lj_ff_base_pcall assembly path. (#8)
+// are broken in GC64 mode on arm64. Protected calls use lua_resume on a helper
+// coroutine — lua_pcall from inside a LIGHTFUNC corrupts interpreter return state. (#8)
 
-static int l_mac_pcall(lua_State* L) {
-    // Stack: [f, arg1, ..., argN]
-    int n = lua_gettop(L);
-    if (n < 1) luaL_error(L, "bad argument #1 to 'pcall' (value expected)");
-    int rc = lua_pcall(L, n - 1, LUA_MULTRET, 0);
-    int nret = lua_gettop(L);
-    if (rc == LUA_OK) {
+// Entry: L = [func, arg1, ..., argN]. Exit: [true, ...] or [false, err].
+static int mac_lightfunc_pcall(lua_State* L, int nargs) {
+    lua_State* co = lua_newthread(L);
+    lua_xmove(L, co, nargs + 1);
+    const int status = lua_resume(co, nullptr, nargs);
+    if (status == 0) {
+        const int nres = lua_gettop(co);
         lua_pushboolean(L, 1);
-        lua_insert(L, 1);
-        return nret + 1;
+        lua_xmove(co, L, nres);
+        lua_pop(L, 1); // drop thread
+        return nres + 1;
+    }
+    if (status == LUA_YIELD) {
+        lua_settop(co, 0);
+        lua_pushliteral(co, "cannot resume non-synchronous function in pcall");
     }
     lua_pushboolean(L, 0);
-    lua_insert(L, 1);
+    if (lua_gettop(co) > 0) {
+        lua_xmove(co, L, 1);
+    } else {
+        lua_pushliteral(L, "(error object is not a string)");
+    }
+    lua_pop(L, 1); // drop thread
     return 2;
 }
 
-static int l_mac_xpcall(lua_State* L) {
-    // Stack: [f, msgh, arg1, ..., argN]
-    int n = lua_gettop(L);
-    if (n < 2) luaL_error(L, "bad argument #2 to 'xpcall' (value expected)");
-    // Swap f and msgh so msgh sits at index 1 (lua_pcall's msgh position)
-    // and f is at index 2 where it needs to be for the nargs-based call.
-    lua_pushvalue(L, 1);   // dup f
-    lua_copy(L, 2, 1);     // overwrite index 1 with msgh
-    lua_replace(L, 2);     // pop dup-f into index 2  → [msgh, f, a1..aN]
-    int rc = lua_pcall(L, n - 2, LUA_MULTRET, 1);
-    int nret = lua_gettop(L) - 1;  // minus the msgh slot that stays
-    lua_remove(L, 1);              // drop msgh
-    if (rc == LUA_OK) {
-        lua_pushboolean(L, 1);
-        lua_insert(L, 1);
-        return nret + 1;
+static int l_mac_pcall(lua_State* L) {
+    const int n = lua_gettop(L);
+    if (n < 1) {
+        luaL_error(L, "bad argument #1 to 'pcall' (value expected)");
     }
+    return mac_lightfunc_pcall(L, n - 1);
+}
+
+static int l_mac_xpcall(lua_State* L) {
+    const int n = lua_gettop(L);
+    if (n < 2) {
+        luaL_error(L, "bad argument #2 to 'xpcall' (value expected)");
+    }
+    const int nargs = n - 2;
+
+    lua_State* co = lua_newthread(L);
+    lua_pushvalue(L, 1);
+    for (int i = 3; i <= n; i++) {
+        lua_pushvalue(L, i);
+    }
+    lua_xmove(L, co, nargs + 1);
+
+    const int status = lua_resume(co, nullptr, nargs);
+    if (status == 0) {
+        const int nres = lua_gettop(co);
+        lua_pushboolean(L, 1);
+        lua_xmove(co, L, nres);
+        lua_settop(L, nres + 1);
+        return nres + 1;
+    }
+
+    const char* err = "(error object is not a string)";
+    if (lua_gettop(co) > 0) {
+        if (const char* s = lua_tostring(co, -1)) {
+            err = s;
+        }
+    }
+    lua_pushvalue(L, 2);
+    lua_pushstring(L, err);
+    if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+        if (const char* s = lua_tostring(L, -1)) {
+            err = s;
+        }
+    }
+    lua_settop(L, 0);
     lua_pushboolean(L, 0);
-    lua_insert(L, 1);
+    lua_pushstring(L, err);
     return 2;
 }
 
@@ -272,8 +310,8 @@ void ui_main_c::CallCallbackOnThread(int extraArgs)
 	}
 	lua_xmove(L, co, extraArgs + 1);
 	lua_pop(L, 1);
-	const int err = lua_pcall(co, extraArgs, 0, 1);
-	if (err && !didExit) {
+	const int err = lua_resume(co, nullptr, extraArgs);
+	if (err != 0 && !didExit) {
 		const char* msg = lua_tostring(co, -1);
 		DoError("Runtime error in", msg ? msg : "unknown");
 	}
