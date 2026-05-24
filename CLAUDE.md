@@ -13,7 +13,8 @@ SimpleGraphic is a shared library (.dll / .dylib) that provides:
 - Lua module loader for `lcurl`, `lzip`, `socket`, `lua-utf8`
 
 The game logic (~99% Lua) lives in a separate repo (`PathOfBuilding-PoE2`). That layer
-needs **zero macOS-specific changes** — all platform work is here.
+needs **minimal macOS-specific changes** for launch/bootstrap only — all platform work
+lives here.
 
 ## Active branch: `macos-port`
 
@@ -24,97 +25,98 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 
 **Phase 2 — runtime integration** (active). **Phase 1 #1–#5 complete** (2026-05-22).
 
-Check the [GitHub Issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
-for what is currently open. Look at `MACOS_PORT.md` for the full plan with decisions log.
+Check [open macOS issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
+and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan.
 
-**Phase 2 — runtime integration** (in progress on `macos-port`): [#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6)/[#7](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/7) merged; **[#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)** — top-level `Launch.lua` chunk + `OnInit`/`RenderInit` pass in isolation; **segfault loading `Modules/Common.lua`** via `PLoadModule("Modules/Main")`. See `MACOS_PORT.md` → **Next session — close #8** (tip `26dc2b1` on `origin/macos-port`).
+### Status snapshot (2026-05-24, evening)
+
+| Area | State |
+|------|--------|
+| Engine `PLoadModule` / return capture | **Done** — stash + Lua wrappers (`ui_api.cpp`, `ui_main.cpp`) |
+| JIT on arm64 | **C API** `luaJIT_setmode` off + stub `jit.opt.start` (`mac_jit_off`) |
+| `loadfile` on macOS | **`__mac_loadfile_stash_c`** + `MacLoadfile` wrapper — never `local f, err = loadfile(...)` |
+| Post-Main init | **`mac_run_after_main_if_requested`** runs `LaunchAfterMain.lua` from C after `OnInit` |
+| PoB launch split | **Implemented locally** — see `docs/macos/pob-launch/` (copy to PoB `src/`) |
+| `Launch.lua` dev test | **`PLoadModule main type=table`** in ~30–90 s with split + minimal `OnInit` |
+| **#8 close criteria** | UI renders, tree loads, calcs run — **`main.Init` + frame loop still to verify** |
+
+### Next steps
+
+1. **Push / merge** engine changes on `macos/issue-8-*` → `macos-port` (this repo).
+2. **PoB repo:** copy `docs/macos/pob-launch/*.lua` into `src/`; PR for [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9).
+3. **Rebuild** → install → run `Launch.lua`; wait for `PLoadModule main type=table`, then **minutes** for `main.Init`.
+4. **Fix** any failure in `LaunchAfterMain.lua` / `LaunchCallbacks.lua` only — **do not bisect `Modules/Main.lua` first**.
+5. **Document** shutdown SIGBUS if it persists after successful Init.
 
 ## Key architectural decisions (do not revisit without discussion)
 
 | Decision | Choice | Reason |
 |---|---|---|
-| LuaJIT on arm64 | v2.1 beta via vcpkg overlay port; **JIT off in PoB host** until launch stable | `jit.off()` + stub `jit.opt.start` in `ScriptInit` (`ui_main.cpp`); standalone `luajit` still JIT-capable |
-| Graphics API | ANGLE (Metal backend on macOS) | Matches Windows path; avoids rewriting renderer |
-| Min deployment target | macOS 13.0 (Ventura) | Covers all M-series hardware in active use |
-| vcpkg triplet | `arm64-osx` in `triplets/arm64-osx.cmake` | Overlay in `vcpkg-configuration.json`; adds libc++ `-isystem` for `-isysroot` builds |
-| ANGLE on macOS | `angle` port with **`metal` feature** in `vcpkg.json` | Produces `liblibEGL_angle.dylib` / `liblibGLESv2_angle.dylib` |
+| LuaJIT on arm64 | v2.1 beta; `luaJIT_setmode` engine off + stub `jit.opt.start` | JIT + GC64 breaks C return capture |
+| C API returns on macOS | Stash in globals; Lua wrappers re-return | Bytecode cannot `local x = GetTime()` from C |
+| `PLoadModule` | `__mac_pload_c` + Lua wrapper + `{ err, main }` | Matches PoB `mainPlm.err` / `mainPlm.main` |
+| PoB launch structure | **3 files** — `Launch.lua`, `LaunchAfterMain.lua`, `LaunchCallbacks.lua` | Monolithic chunk + fat `OnInit` poison VM before Main |
+| Version placeholders | **`"?"` only after `PLoadModule`** | Assigning `version* = "?"` before Main crashes |
+| AfterMain load | **From C**, not `__mac_dofile_c` in `Launch.lua` | Same-chunk `dofile` breaks `PLoadModule` at compile time |
+| `require("xml")` | **After** Main | xml before Main breaks load on macOS |
+| Graphics API | ANGLE (Metal on macOS) | Matches Windows path |
 
 ## Build command (macOS)
 
-**Path constraint:** the repository path must not contain spaces — LuaJIT's vcpkg
-`make` build splits `PREFIX` at whitespace and fails. Relocate the clone or use a
-worktree (e.g. `~/PoB-SimpleGraphic-build`) for vcpkg/cmake.
+**Path constraint:** repository path must not contain spaces (LuaJIT `make` splits `PREFIX`).
 
 ```bash
-cmake -B build -S . \
-  -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
-  -DVCPKG_TARGET_TRIPLET=arm64-osx \
-  -DCMAKE_OSX_ARCHITECTURES=arm64
-cmake --build build --config Release
-cmake --install build --prefix /path/to/PoB/runtime-macos
+cp "$ENGINE_REPO"/ui_api.cpp "$ENGINE_REPO"/ui_main.cpp "$ENGINE_REPO"/ui_main.h ~/PoB-SimpleGraphic-build/
+ninja -C ~/PoB-SimpleGraphic-build/build
+cmake --install ~/PoB-SimpleGraphic-build/build --prefix ~/PoB-PoE2-build/runtime-macos
 ```
 
-**PoB dev launch** (after install): symlink `runtime/SimpleGraphic` → `runtime-macos/SimpleGraphic`, run from PoB repo root. Staged tests: `Launch_oninit_only.lua` (passes), `Launch_oninit_pload.lua` (Common load — current blocker). Use space-free worktrees: `~/PoB-SimpleGraphic-build`, `~/PoB-PoE2-build`.
+**PoB dev launch** (from `~/PoB-PoE2-build`):
+
+```bash
+ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic
+./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
+./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_pload.lua  # regression
+```
+
+Use space-free worktrees: `~/PoB-SimpleGraphic-build`, `~/PoB-PoE2-build`.
 
 ## Implementation specs
-
-Detailed per-issue execution specs live in `docs/macos/`. Each spec contains the
-exact files to create/modify, the exact content, key decisions, and a verification
-checklist. Always check for a spec before starting work on an issue.
 
 | Issue | Spec |
 |---|---|
 | #6 runtime-macos layout | `docs/macos/issue-6-runtime-layout.md` |
-
-**LuaJIT-only verify** (Phase 1.2 — classic manifest install of one port):
-
-```bash
-./vcpkg/bootstrap-vcpkg.sh
-./vcpkg/vcpkg install luajit --triplet arm64-osx --classic \
-  --overlay-ports=vcpkg-ports/ports --overlay-triplets=triplets
-export DYLD_LIBRARY_PATH="$(pwd)/vcpkg/installed/arm64-osx/lib"
-./vcpkg/installed/arm64-osx/tools/luajit/luajit -e 'print("ok", jit and jit.arch)'
-```
+| #8 dev launch handoff | `docs/macos/issue-8-launch-handoff.md` |
+| PoB launch reference | `docs/macos/pob-launch/` |
 
 ## Files to know
 
 | File | Purpose |
 |---|---|
-| `engine/system/win/sys_main.cpp` | Platform entry, user data dir, thread/timer |
-| `engine/system/win/sys_macos.mm` | macOS-specific Obj-C++ implementations |
-| `engine/system/win/sys_video.cpp` | GLFW window + OpenGL context creation |
-| `ui_main.cpp` | Lua host: `ScriptInit`, `PCall`, macOS `jit.off()`, `OnInit` |
-| `ui_api.cpp` | Lua API; macOS `LoadModule`/`PLoadModule` via Lua `loadfile` |
-| `win/entry.cpp` | Windows DLL export `RunLuaFileAsWin` |
-| `mac/entry.cpp` | macOS `RunLuaFileAsWin` + `main()` (standalone dev launch) |
-| `triplets/arm64-osx.cmake` | vcpkg arm64-osx triplet definition |
-| `vcpkg-ports/ports/luajit/` | Custom LuaJIT port with macOS patches |
-| `MACOS_PORT.md` | Full plan, task checklist, decisions log |
+| `ui_main.cpp` | `mac_jit_off`, LIGHTFUNC builtins, stash wrappers, **`mac_run_after_main_if_requested`** |
+| `ui_api.cpp` | `PLoadModule` / `LoadModule`, `mac_push_plm_result` |
+| `docs/macos/pob-launch/` | Reference `Launch*.lua` for PoB repo |
+| `MACOS_PORT.md` | Full plan + handoff sections A–F |
+| `.cursor/rules/macos-port.mdc` | Cursor always-on port context |
 
 ## Conventions
 
 - One branch per issue: `macos/issue-N-short-description`
 - PR titles: `[macOS] short description (closes #N)`
-- When a task is complete: close the issue and tick the checkbox in `MACOS_PORT.md`
-- Append to the **Notes & Decisions Log** in `MACOS_PORT.md` for any non-obvious choice
-- Do not modify `CMakeLists.txt` Windows-only paths — add `if(APPLE)` blocks alongside them
+- Tick `MACOS_PORT.md` checkboxes and append **Notes & Decisions Log** when done
+- Do not modify Windows-only paths — add `if(APPLE)` alongside
 
 ## Running tests
 
 ```bash
-# Lua logic tests (Docker, cross-platform — use PathOfBuilding-PoE2 repo)
-docker-compose up
-
-# macOS smoke test (once Phase 2 is complete)
-./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
+./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_pload.lua
+./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua   # wait 50–90s+ for Main load line
 ```
 
 ## Upstream sync
 
 ```bash
 git fetch upstream
-git rebase upstream/master   # on master branch only
-# then rebase macos-port onto updated master
-git checkout macos-port
-git rebase master
+git rebase upstream/master   # on master only
+git checkout macos-port && git rebase master
 ```

@@ -719,6 +719,8 @@ static int l_RenderInit(lua_State* L)
 #if __APPLE__ && __MACH__
 	// RenderInit may run console/window setup; drop stray stack values before return.
 	lua_settop(L, nargs);
+	// JIT traces into GC cclosures fault after RenderInit on arm64 GC64; module loads use lightfuncs. (#8)
+	mac_jit_off(L);
 #endif
 	return 0;
 }
@@ -726,16 +728,31 @@ static int l_RenderInit(lua_State* L)
 static int l_GetScreenSize(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
+#if __APPLE__ && __MACH__
+	lua_createtable(L, 2, 0);
+	lua_pushinteger(L, ui->renderer->VirtualScreenWidth());
+	lua_rawseti(L, -2, 1);
+	lua_pushinteger(L, ui->renderer->VirtualScreenHeight());
+	lua_rawseti(L, -2, 2);
+	lua_setglobal(L, "__mac_api_result");
+	return 0;
+#else
 	lua_pushinteger(L, ui->renderer->VirtualScreenWidth());
 	lua_pushinteger(L, ui->renderer->VirtualScreenHeight());
 	return 2;
+#endif
 }
 
 static int l_GetScreenScale(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	lua_pushnumber(L, ui->renderer->VirtualScreenScaleFactor());
+#if __APPLE__ && __MACH__
+	lua_setglobal(L, "__mac_api_result");
+	return 0;
+#else
 	return 1;
+#endif
 }
 
 static int l_SetClearColor(lua_State* L)
@@ -1703,7 +1720,12 @@ static int l_GetTime(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	lua_pushinteger(L, ui->sys->GetTime());
+#if __APPLE__ && __MACH__
+	lua_setglobal(L, "__mac_api_result");
+	return 0;
+#else
 	return 1;
+#endif
 }
 
 static int l_GetScriptPath(lua_State* L)
@@ -1963,6 +1985,155 @@ SG_LUA_CPP_FUN_BEGIN(PLoadModule)
 SG_LUA_CPP_FUN_END()
 #endif
 
+#if __APPLE__ && __MACH__
+static std::filesystem::path mac_module_file_path(ui_main_c* ui, const char* modName)
+{
+	auto fileName = std::filesystem::u8path(modName);
+	if (!fileName.has_extension()) {
+		fileName.replace_extension(".lua");
+	}
+	return (ui->scriptPath / fileName).lexically_normal();
+}
+
+static void mac_push_plm_result(lua_State* L, bool ok, int errIndex)
+{
+	if (!ok) {
+		lua_createtable(L, 0, 1);
+		if (lua_gettop(L) >= errIndex && lua_isstring(L, errIndex)) {
+			lua_pushvalue(L, errIndex);
+		} else {
+			lua_pushliteral(L, "unknown error");
+		}
+		lua_setfield(L, -2, "err");
+		lua_settop(L, 1);
+		return;
+	}
+	lua_remove(L, 1); // drop success flag from mac_lightfunc_pcall
+	lua_createtable(L, 0, 2);
+	lua_pushnil(L);
+	lua_setfield(L, -2, "err");
+	if (lua_gettop(L) >= 1) {
+		lua_pushvalue(L, 1);
+		lua_setfield(L, -2, "main");
+		lua_remove(L, 1);
+	}
+	lua_replace(L, 1);
+	lua_settop(L, 1);
+}
+
+static int l_LoadModule(lua_State* L)
+{
+	ui_main_c* ui = GetUIPtr(L);
+	int n = lua_gettop(L);
+	if (n < 1) {
+		luaL_error(L, "Usage: LoadModule(name[, ...])");
+	}
+	if (!lua_isstring(L, 1)) {
+		luaL_error(L, "LoadModule() argument 1: expected string, got %s", luaL_typename(L, 1));
+	}
+	const int extraArgs = n - 1;
+	auto filePath = mac_module_file_path(ui, lua_tostring(L, 1));
+	auto fileStr = filePath.generic_u8string();
+
+	ui->sys->SetWorkDir(ui->scriptPath);
+	int err = luaL_loadfile(L, fileStr.c_str());
+	ui->sys->SetWorkDir(ui->scriptWorkDir);
+	if (err != 0) {
+		luaL_error(L, "LoadModule() error loading '%s' (%d):\n%s", fileStr.c_str(), err,
+		           lua_tostring(L, -1));
+	}
+	lua_replace(L, 1);
+	const int pret = mac_lightfunc_pcall(L, extraArgs);
+	if (!lua_toboolean(L, 1)) {
+		const char* msg = (pret >= 2 && lua_tostring(L, 2)) ? lua_tostring(L, 2) : "unknown";
+		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(), msg);
+	}
+	lua_remove(L, 1);
+	const int nret = lua_gettop(L);
+	lua_createtable(L, 0, 4);
+	lua_pushinteger(L, nret > 0 ? 1 : 0);
+	lua_setfield(L, -2, "n");
+	for (int i = 0; i < 3 && i < nret; i++) {
+		lua_pushvalue(L, i + 1);
+		lua_setfield(L, -2, i == 0 ? "r1" : (i == 1 ? "r2" : "r3"));
+	}
+	lua_pushvalue(L, 1);
+	lua_setglobal(L, "__mac_loadmodule_result");
+	lua_settop(L, 0);
+	return 0;
+}
+
+static int l_PLoadModule(lua_State* L)
+{
+	ui_main_c* ui = GetUIPtr(L);
+	int n = lua_gettop(L);
+	if (n < 1) {
+		luaL_error(L, "Usage: PLoadModule(name[, ...])");
+	}
+	if (!lua_isstring(L, 1)) {
+		luaL_error(L, "PLoadModule() argument 1: expected string, got %s", luaL_typename(L, 1));
+	}
+	const int extraArgs = n - 1;
+	auto filePath = mac_module_file_path(ui, lua_tostring(L, 1));
+	auto fileStr = filePath.generic_u8string();
+
+	ui->sys->SetWorkDir(ui->scriptPath);
+	int err = luaL_loadfile(L, fileStr.c_str());
+	ui->sys->SetWorkDir(ui->scriptWorkDir);
+	if (err) {
+		lua_settop(L, 1);
+		mac_push_plm_result(L, false, 1);
+		return 1;
+	}
+	lua_replace(L, 1);
+	const int pret = mac_lightfunc_pcall(L, extraArgs);
+	mac_push_plm_result(L, lua_toboolean(L, 1), pret >= 2 ? 2 : 1);
+	lua_pushvalue(L, 1);
+	lua_setglobal(L, "__mac_pload_result");
+	lua_settop(L, 0);
+	return 0;
+}
+
+#endif
+
+#if __APPLE__ && __MACH__
+static int l_PCall(lua_State* L)
+{
+	ui_main_c* ui = GetUIPtr(L);
+	int n = lua_gettop(L);
+	if (n < 1) {
+		luaL_error(L, "Usage: PCall(func[, ...])");
+	}
+	if (!lua_isfunction(L, 1)) {
+		luaL_error(L, "PCall() argument 1: expected function, got %s", luaL_typename(L, 1));
+	}
+	const int pret = mac_lightfunc_pcall(L, n - 1);
+	if (!lua_toboolean(L, 1)) {
+		lua_createtable(L, 0, 1);
+		if (pret >= 2) {
+			lua_pushvalue(L, 2);
+		} else {
+			lua_pushliteral(L, "unknown error");
+		}
+		lua_rawseti(L, -2, 1);
+		lua_setglobal(L, "__mac_api_result");
+		lua_settop(L, 0);
+		return 0;
+	}
+	lua_remove(L, 1);
+	const int nret = lua_gettop(L);
+	lua_createtable(L, nret + 1, 0);
+	lua_pushnil(L);
+	lua_rawseti(L, -2, 1);
+	for (int i = 0; i < nret; i++) {
+		lua_pushvalue(L, i + 1);
+		lua_rawseti(L, -2, i + 2);
+	}
+	lua_setglobal(L, "__mac_api_result");
+	lua_settop(L, 0);
+	return 0;
+}
+#else
 static int l_PCall(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
@@ -1979,6 +2150,7 @@ static int l_PCall(lua_State* L)
 	lua_replace(L, 1); // Replace traceback function with nil
 	return lua_gettop(L);
 }
+#endif
 
 static int l_ConPrintf(lua_State* L)
 {
@@ -2175,8 +2347,13 @@ static int l_SetForeground(lua_State* L)
 // Library and API Initialisation
 // ==============================
 
-#define ADDFUNC(n) lua_pushcclosure(L, l_##n, 0);lua_setglobal(L, #n);
-#define ADDFUNCCL(n, u) lua_pushcclosure(L, l_##n, u);lua_setglobal(L, #n);
+#if __APPLE__ && __MACH__
+// GC cclosures: bytecode cannot capture return values from OnInit on arm64 GC64. (#8)
+#define ADDFUNC(n) lua_pushcfunction(L, l_##n); lua_setglobal(L, #n);
+#else
+#define ADDFUNC(n) lua_pushcclosure(L, l_##n, 0); lua_setglobal(L, #n);
+#endif
+#define ADDFUNCCL(n, u) lua_pushcclosure(L, l_##n, u); lua_setglobal(L, #n);
 
 int ui_main_c::InitAPI(lua_State* L)
 {
@@ -2344,45 +2521,13 @@ int ui_main_c::InitAPI(lua_State* L)
 	ADDFUNC(LaunchSubScript);
 	ADDFUNC(AbortSubScript);
 	ADDFUNC(IsSubScriptRunning);
-#if !(__APPLE__ && __MACH__)
 	ADDFUNC(LoadModule);
 	ADDFUNC(PLoadModule);
+#if __APPLE__ && __MACH__
+	lua_pushcfunction(L, l_PLoadModule);
+	lua_setglobal(L, "__mac_pload_c");
 #endif
 	ADDFUNC(PCall);
-#if __APPLE__ && __MACH__
-	{
-		ui_main_c* ui = GetUIPtr(L);
-		// Avoid nested C lua_call/lua_pcall from module loaders under OnInit (#8).
-		static char const* const kMacModuleLoaders =
-			"local function __loadfile(fileName)\n"
-			"  if not fileName:match('%.lua$') then fileName = fileName .. '.lua' end\n"
-			"  return loadfile(fileName)\n"
-			"end\n"
-			"local function __pack_returns(into, ...)\n"
-			"  local n = select('#', ...)\n"
-			"  for i = 1, n do into[i] = select(i, ...) end\n"
-			"  return n\n"
-			"end\n"
-			"function LoadModule(fileName, ...)\n"
-			"  local func, err = __loadfile(fileName)\n"
-			"  if not func then error(\"LoadModule() error loading '\"..fileName..\"': \"..err, 2) end\n"
-			"  local packed = {}\n"
-			"  local n = __pack_returns(packed, func(...))\n"
-			"  return { r1 = packed[1], r2 = packed[2], r3 = packed[3], n = n }\n"
-			"end\n"
-			"function PLoadModule(fileName, ...)\n"
-			"  local func, err = __loadfile(fileName)\n"
-			"  if not func then return { err = err } end\n"
-			"  local packed = {}\n"
-			"  local n = __pack_returns(packed, func(...))\n"
-			"  if n == 0 then return { err = false, main = nil } end\n"
-			"  return { err = false, main = packed[1] }\n"
-			"end\n";
-		if (luaL_dostring(L, kMacModuleLoaders) != LUA_OK) {
-			ui->sys->Error("Error initialising module loaders: %s\n", lua_tostring(L, -1));
-		}
-	}
-#endif
 	lua_getglobal(L, "string");
 	lua_getfield(L, -1, "format");
 	ADDFUNCCL(ConPrintf, 1);

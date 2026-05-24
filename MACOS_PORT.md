@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — top-level chunk + OnInit OK; segfault loading `Modules/Common.lua`)*
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — split launch reaches `PLoadModule main type=table`; **UI / `main.Init` verification pending** — see plan below)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2
@@ -149,12 +149,13 @@ compiled for macOS and the CI is Windows-only.
   macOS passes the Lua script as `argv[1]`; `sys_main.cpp` shifts args so `argv[0]` is the
   script (matching Windows host behaviour).
 
-  **JIT:** `ui_main.cpp` calls `jit.off()` and stubs `jit.opt.start` before loading the
-  script (Launch.lua calls `jit.opt.start` at top level; stub is a no-op on macOS).
+  **JIT:** `jit.opt.start` stubbed; `mac_jit_off()` runs before the top-level script chunk and after
+  `RenderInit` (interpreter path for return capture — see decisions log 2026-05-24).
 
-  **Progress (2026-05-23):** `Launch_oninit_only.lua` exits 0 (`OnInit` + `require("xml")`).
-  `RenderInit` succeeds. `PLoadModule("GameVersions")` works. Segfault remains when
-  `PLoadModule("Modules/Main")` loads `Modules/Common.lua` (not the top-level Launch chunk).
+  **Progress (2026-05-24):** Split launch (`Launch.lua` + `LaunchAfterMain.lua` +
+  `LaunchCallbacks.lua`; reference in `docs/macos/pob-launch/`) reaches **`PLoadModule main type=table`**
+  in ~30–90 s. Engine runs AfterMain from C (`mac_run_after_main_if_requested`). **Still to verify:**
+  `main.Init`, frame loop, UI. **Do not bisect Main.lua first.**
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 
@@ -164,104 +165,131 @@ compiled for macOS and the CI is Windows-only.
 
 ### Next session — close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) (dev launch)
 
-**Branch:** `macos/issue-8-sync-smoke-merge` (`sync-smoke` merged into `macos-port`; PR when stable).
+**Branch:** `macos-port` (or active issue branch). Sync engine → `~/PoB-SimpleGraphic-build` before every build.
 
-**Engine fixes landed on `macos-port` (closes most early #8 crashes):**
+**Pick up here:** Copy **`docs/macos/pob-launch/*.lua`** → PoB `src/`. Rebuild engine → install → run `Launch.lua`. Expect **`PLoadModule main type=table`** after 30–90 s; **`main.Init`** may take minutes.
+
+| File | Role |
+|------|------|
+| **`Launch.lua`** | Minimal `OnInit`: dev heuristic → `RenderInit` → `PLoadModule` → `launch._mainPlm` + `launch._runAfterMain` |
+| **`LaunchAfterMain.lua`** | Version `"?"`, stash-load callbacks, `main.Init`, xml, updates — **engine runs from C** after `OnInit` |
+| **`LaunchCallbacks.lua`** | All other `launch:*` handlers |
+
+**GC64 rules:** no `version* = "?"` before `PLoadModule`; no fat `OnInit` / `__mac_dofile_c` in `Launch.lua`; no `local f, err = loadfile(...)`; use `if mainPlm.err` / `mainPlm.main`.
+
+---
+
+#### F. Next steps (ordered)
+
+1. **Merge / push** engine branch with `mac_run_after_main_if_requested`, `luaJIT_setmode` off, `__mac_loadfile_stash_c`.
+2. **PoB PR ([#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9)):** launch split from `docs/macos/pob-launch/`.
+3. **Verify:** `Launch_oninit_pload.lua` (regression) → `Launch.lua` (target); confirm UI after `main.Init`.
+4. **Close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)** when dev launch success criteria met.
+5. **Optional:** shutdown SIGBUS on exit after short scripts (separate from Main-load blocker).
+
+---
+
+#### A. Engine fixes landed (2026-05-24, `ui_main.cpp` + `ui_api.cpp`)
 
 | Area | Fix |
 |------|-----|
-| Script load | `luaL_loadfile` uses full resolved `scriptName` path (`ui_main.cpp`) |
-| `PCall` / coroutine | Skip `coroutine._list` when nil; fix stack after `PCall` |
-| EGL / GLFW | `libEGL.dylib` / `libGLESv2.dylib` symlinks in `runtime-macos/` (`macos_bundle_runtime.cmake`) |
-| Window | `glfwWindowShouldClose(nullptr)` guard; `IsActive()` null `wnd` guard |
-| Input | `conUI` / `renderer` null checks in `KeyEvent` |
-| Lua paths | `package.path` + `runtime/lua/?/init.lua`; `package.cpath` → `basePath/?.so` |
-| Module load | macOS **Lua** `LoadModule` / `PLoadModule` via `loadfile` + `func(...)` (avoids nested C `lua_call` / `lua_pcall` under `OnInit`) |
-| JIT / builtins | JIT on; stub `jit.opt.start`; LIGHTFUNC `require`/`pcall`/`xpcall`; `dlopen` preload |
+| Script load | `luaL_loadfile` uses full resolved `scriptName` path |
+| `PCall` / coroutine | Skip `coroutine._list` when nil; mac `l_PCall` uses `mac_lightfunc_pcall` |
+| EGL / GLFW | `libEGL.dylib` / `libGLESv2.dylib` symlinks in `runtime-macos/` |
+| Window / input | Null guards (`IsActive`, `KeyEvent`, `glfwWindowShouldClose`) |
+| Lua paths | `package.path` + `package.cpath`; `dlopen` preload for `.so` modules |
+| LIGHTFUNC builtins | `require`, `loadfile`, `pcall`, `xpcall`, `setmetatable`, hooked `coroutine.create` + `__mac_restore_co` |
+| **C return capture** | macOS `ADDFUNC` → `lua_pushcfunction`; APIs that return to Lua **stash** in `__mac_api_result` / `__mac_pload_result` / `__mac_loadmodule_result` and **return 0**; Lua wrappers re-return (`GetTime`, `GetScreenSize`, `GetScreenScale`, `LoadModule`, `PCall`, `PLoadModule`) |
+| **`PLoadModule`** | C impl + `__mac_pload_c` + Lua wrapper; `mac_push_plm_result` stack index fix (`lua_setfield(L, -2, "main")`) |
+| **JIT** | `luaJIT_setmode` off via C API (`mac_jit_off`); `jit.opt.start` stubbed |
+| **loadfile** | `__mac_loadfile_stash_c` + `MacLoadfile` Lua wrapper |
+| **AfterMain** | `mac_run_after_main_if_requested` runs `LaunchAfterMain.lua` from C after `OnInit` |
 
-**What passes today (PoB dev clone `~/PoB-PoE2-build`):**
+---
+
+#### B. What passes today (`~/PoB-PoE2-build`)
 
 | Test | Result |
 |------|--------|
-| `./src/Launch_oninit_only.lua` | Exit 0 — `OnInit OK`, `xml OK` |
-| `RenderInit("DPI_AWARE")` | Renderer initialises |
-| `PLoadModule("GameVersions")` (statement) | OK |
-| `LoadModule("GameVersions")` + `require("xml")` | OK |
+| `Launch_oninit_pload.lua` | `PLoadModule("Modules/Main")` OK — `main type=table` |
+| `Launch_stub.lua` | Minimal top chunk + Main load (multi-minute) |
+| **Split `Launch.lua`** | **`PLoadModule main type=table`** in ~30–90 s (AfterMain + Init TBD) |
+| Monolithic `Launch.lua` (all callbacks in one file) | **Segfault** at Main in &lt;1 s — use split |
 
-**Current blockers:** (1) **multi-assign** on arm64 LuaJIT (`local a,b = …` / `a,b = f()`)
-segfaults with `jit.off()`; PoB `Launch.lua` line 71 needs `errMsg, self.main = PLoadModule(...)`.
-(2) **`sha1`** — lazy-init precalc in PoB `runtime/lua/sha1/init.lua` ([#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9)).
-(3) **`l_mac_pcall`** — try `lua_resume` if LIGHTFUNC return still faults.
+---
 
-**Success criterion (unchanged):** UI renders, passive tree loads, basic calculations run.
+#### C. Root causes (do not re-litigate)
 
-#### Step 1 — Rebuild and install (every session)
+1. **Bytecode cannot capture C API return values** on arm64 GC64 — stash + Lua wrappers; C API `luaJIT_setmode` JIT off.
+2. **`require("xml")` before Main** — breaks Main load; defer until AfterMain.
+3. **`type(node)` in manifest loop** — use numeric `for i = 1, #t`.
+4. **Monolithic `Launch.lua` chunk** — all `launch:*` defs before `OnInit` poison VM; split into 3 files.
+5. **`version* = "?"` before `PLoadModule`** — crashes; set placeholders in `LaunchAfterMain.lua` only.
+6. **Fat `OnInit` or `__mac_dofile_c` in `Launch.lua`** — same-chunk bytecode breaks `PLoadModule`; AfterMain runs from **C**.
 
-Use a **space-free** build worktree (`~/PoB-SimpleGraphic-build`). Install the full
-`runtime-macos` bundle (not only `cp` of the host + one dylib).
+---
 
-```bash
-cd ~/PoB-SimpleGraphic-build
-git fetch origin && git reset --hard origin/macos/issue-8-sync-smoke-merge
+#### D. Launch split (PoB repo [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9); engine [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8))
 
-VCPKG_CMAKE="$(pwd)/vcpkg/downloads/tools/cmake-3.31.10-osx/cmake-3.31.10-macos-universal/CMake.app/Contents/bin/cmake"
-NINJA="$(pwd)/vcpkg/downloads/tools/ninja-1.13.2-osx/ninja"
+**Reference files:** `docs/macos/pob-launch/` (`Launch.lua`, `LaunchAfterMain.lua`, `LaunchCallbacks.lua`).
 
-"$NINJA" -C build
-"$VCPKG_CMAKE" --install build --prefix ~/PoB-PoE2-build/runtime-macos
+**Load callbacks** via stash (in `LaunchAfterMain.lua`):
 
-# Optional EGL aliases if install script did not create them:
-cd ~/PoB-PoE2-build/runtime-macos
-ln -sf liblibEGL_angle.dylib libEGL.dylib
-ln -sf liblibGLESv2_angle.dylib libGLESv2.dylib
+```lua
+__mac_loadfile_stash_c("LaunchCallbacks.lua")
+local cbChunk = __mac_loadfile_chunk
+local cbErr = __mac_loadfile_err
+__mac_loadfile_chunk = nil
+__mac_loadfile_err = nil
+if cbChunk then cbChunk() end
 ```
 
-#### Step 2 — Dev launch and staged tests
+**PoB macOS patches** (keep in AfterMain / callbacks):
+
+- Numeric manifest loop; no `type(node)`.
+- `devMode` via `io.open("Modules/Main.lua")` before Main.
+- `pcall(require, "xml")` after Main for version strings.
+
+---
+
+#### E. Session workflow (every time)
+
+**1. Rebuild and install** (space-free worktree `~/PoB-SimpleGraphic-build`):
 
 ```bash
-cd ~/PoB-PoE2-build
+cp "$ENGINE_REPO"/ui_api.cpp "$ENGINE_REPO"/ui_main.cpp "$ENGINE_REPO"/ui_main.h ~/PoB-SimpleGraphic-build/
+ninja -C ~/PoB-SimpleGraphic-build/build
+cmake --install ~/PoB-SimpleGraphic-build/build --prefix ~/PoB-PoE2-build/runtime-macos
+```
+
+**2. Staged tests** (from `~/PoB-PoE2-build`):
+
+```bash
 ln -sfn "$(pwd)/runtime/SimpleGraphic" runtime-macos/SimpleGraphic
 
 ./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_only.lua
-./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_pload.lua   # expect progress past segfault
-./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
+./runtime-macos/"Path of Building-PoE2" ./src/Launch_oninit_pload.lua
+./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua          # target after split
 ```
 
-Expect: `LuaJIT JIT disabled on macOS (interpreter mode).`  
-First full `Launch.lua` load may take **1–3 minutes** in interpreter mode.
+First full Main load may take **1–3+ minutes** — do not kill early.
 
-#### Step 3 — Bisect `Modules/Common.lua` (current blocker)
+**3. Debugging notes**
 
-In PoB `src/`, bisect `require()` in `Modules/Common.lua` (after `GameVersions` loads):
+- Use **`ConPrintf`**, not `print()`.
+- **Do not bisect `Modules/Main.lua` first** for the full-`Launch.lua` &lt;1 s crash — split the launch chunk first.
+- Bisect scripts (`Launch_*.lua`) live in `~/PoB-PoE2-build/src/` only unless committed to PoB fork.
+- `lldb` often hangs on this host; prefer staged `ConPrintf` traces.
 
-1. `require("lcurl.safe")` — needs `lcurl.so` on `package.cpath` (engine sets `runtime-macos/?.so`)
-2. `require("sha1")` — needs `runtime/lua/sha1/init.lua` on `package.path`
+**4. After #8 passes**
 
-Use small `Launch_*.lua` scripts under `src/` (local only, not committed) or lldb:
+- [ ] Close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8); track PoB-only quirks in [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9)
+- [ ] Commit PoB `Launch.lua` / `LaunchCallbacks.lua` split + macOS manifest/xml ordering
+- [ ] PoB fork: `runtime-macos/` layout ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6))
+- [ ] Defer Phase 3–4 until dev launch stable
+- [ ] Optional: shutdown SIGBUS on short scripts; `require("xml")` after Main safety
 
-```bash
-lldb ./runtime-macos/"Path of Building-PoE2"
-settings set target.run-args ./src/Launch_oninit_pload.lua
-run
-bt
-```
-
-#### Step 4 — Notes for debugging
-
-- Avoid `print()` in test scripts — use `ConPrintf`; macOS `l_print` can fault.
-- `local err, x = PLoadModule(...)` and statement `PLoadModule(...)` both fault on **Main**;
-  issue is **Common.lua load**, not only multi-return assignment.
-- PoB bisect scripts (`Launch_bisect_*.lua`, `Launch_oninit_pload.lua`, etc.) live only in
-  `~/PoB-PoE2-build/src/` unless copied into a future session.
-
-#### Step 5 — After #8 passes
-
-- [ ] Close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8); file Lua issues in [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9) if any
-- [ ] PoB fork: commit `runtime-macos/` layout + sync instructions ([#6](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/6) on PoB repo)
-- [ ] Defer Phase 3–4 (.app, CI, signing) until dev launch is stable
-- [ ] Revisit LuaJIT JIT on arm64 only after stable launch (interpreter OK for now)
-
-**Paths:** engine clone `~/GitHub - Personal/PathOfBuilding-SimpleGraphic` (or any space-free worktree); build `~/PoB-SimpleGraphic-build`; PoB `~/PoB-PoE2-build`. **No spaces** in the engine build path.
+**Paths:** engine `~/GitHub - Personal/PathOfBuilding-SimpleGraphic`; build `~/PoB-SimpleGraphic-build`; PoB `~/PoB-PoE2-build`. **No spaces** in engine build path.
 
 ---
 
@@ -473,3 +501,16 @@ Target command: `brew install --cask path-of-building-2`
   **New blockers:** (1) LuaJIT arm64 **multi-assign** (`local a,b = …`) segfaults with
   `jit.off()` (also on `26dc2b1`); PoB `Launch.lua` needs `errMsg, main = PLoadModule(...)`.
   (2) `l_mac_pcall` LIGHTFUNC return — try `lua_resume` per `sync-smoke` notes.
+- **2026-05-24** — **#8 return-capture + `PLoadModule`:** macOS C APIs stash results and Lua
+  wrappers re-return (`__mac_api_result`, `__mac_pload_result`, `__mac_pload_c`). `PLoadModule(Main)`
+  passes in `Launch_oninit_pload.lua`. **Full `Launch.lua` fails** because the large single chunk
+  (all `launch:*` defs) is compiled before `OnInit` — **not** Main content. **`require("xml")` before
+  Main** also breaks Main. **`type()` in manifest loop** segfaults. **Next:** split `Launch.lua` →
+  bootstrap + `LaunchCallbacks.lua` (see **Next session — close #8**). PoB-local `Launch.lua` patches
+  documented there. Interim: `Launch_stub.lua` / `Launch_oninit_pload.lua`.
+- **2026-05-24 (evening)** — **Launch split + engine AfterMain:** `luaJIT_setmode` C API JIT off;
+  `__mac_loadfile_stash_c` / `MacLoadfile`; `mac_run_after_main_if_requested` runs
+  `LaunchAfterMain.lua` from C (must not call `__mac_dofile_c` from `Launch.lua`). Bisect:
+  `versionNumber/Branch/Platform = "?"` **before** `PLoadModule` crashes; fat `OnInit` in one function
+  also crashes. Reference PoB files in `docs/macos/pob-launch/`. Split `Launch.lua` reaches
+  **`PLoadModule main type=table`** (~30–90 s). **#8 still open** until UI + `main.Init` verified.
