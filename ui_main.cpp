@@ -485,10 +485,7 @@ void ui_main_c::ScriptInit()
 	lua_gc(L, LUA_GCRESTART, -1);
 
 #if __APPLE__ && __MACH__
-	// Launch.lua calls jit.opt.start() which crashed the interpreter via a broken GC64 path.
-	// Keep JIT ON (it generates correct native code for GC function calls, unlike the
-	// interpreter's CALL dispatch which is broken for GC64 pointers on arm64). Only stub
-	// jit.opt.start so PoB's call to it is harmless. (#8)
+	// Stub jit.opt.start (broken GC64 interpreter path); keep JIT on for multi-assign. (#8)
 	static char const* const kMacJit =
 		"if jit then "
 		"jit.opt.start = function(...) end "
@@ -534,8 +531,6 @@ void ui_main_c::ScriptInit()
 	}
 
 	// Replace built-ins that are GC closures (or use broken fast-paths) in arm64 GC64.
-	// With JIT on the built-in pcall/xpcall become GC functions whose GGET+CALL crashes;
-	// our LIGHTFUNC replacements avoid that. (#8)
 	lua_pushcfunction(L, l_mac_require); lua_setglobal(L, "require");
 	lua_pushcfunction(L, l_mac_pcall);   lua_setglobal(L, "pcall");
 	lua_pushcfunction(L, l_mac_xpcall);  lua_setglobal(L, "xpcall");
