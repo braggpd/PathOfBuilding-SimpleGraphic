@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — split launch reaches `PLoadModule main type=table`; **UI / `main.Init` verification pending** — see plan below)*
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — all ADDFUNCCL CCLosures fixed; new CClosure crash inside Main.lua coroutine — see next-session plan below)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2
@@ -152,10 +152,12 @@ compiled for macOS and the CI is Windows-only.
   **JIT:** `jit.opt.start` stubbed; `mac_jit_off()` runs before the top-level script chunk and after
   `RenderInit` (interpreter path for return capture — see decisions log 2026-05-24).
 
-  **Progress (2026-05-24):** Split launch (`Launch.lua` + `LaunchAfterMain.lua` +
-  `LaunchCallbacks.lua`; reference in `docs/macos/pob-launch/`) reaches **`PLoadModule main type=table`**
-  in ~30–90 s. Engine runs AfterMain from C (`mac_run_after_main_if_requested`). **Still to verify:**
-  `main.Init`, frame loop, UI. **Do not bisect Main.lua first.**
+  **Progress (2026-05-24 evening):** All seven `ADDFUNCCL` CCLosures (ConPrintf, SetCallback,
+  GetCallback, SetMainObject, NewImageHandle, NewArtHandle, NewFileSearch) converted to LIGHTFUNCs
+  on macOS — commit `6b03f97` on `macos/issue-8-sync-smoke-merge`. New crash: `EXC_BAD_ACCESS`
+  inside `mac_lightfunc_pcall` (Main.lua's coroutine) before `PLoadModule main type=table` prints.
+  This is a **different CClosure in Main.lua itself** — not in engine API. **Next step: lldb
+  backtrace of new crash to identify the function.**
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 
@@ -163,11 +165,27 @@ compiled for macOS and the CI is Windows-only.
 
   The Lua layer should need zero changes. If issues appear, document them here.
 
-### Next session — close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) (dev launch)
+### Next session — identify remaining CClosure in Main.lua (#8)
 
-**Branch:** `macos-port` (or active issue branch). Sync engine → `~/PoB-SimpleGraphic-build` before every build.
+**Branch:** `macos/issue-8-sync-smoke-merge` (tip: `6b03f97`). Sync engine → `~/PoB-SimpleGraphic-build` before every build.
 
-**Pick up here:** Copy **`docs/macos/pob-launch/*.lua`** → PoB `src/`. Rebuild engine → install → run `Launch.lua`. Expect **`PLoadModule main type=table`** after 30–90 s; **`main.Init`** may take minutes.
+**Pick up here:** Get lldb backtrace of the crash inside `mac_lightfunc_pcall` during Main.lua loading.
+
+```bash
+cd ~/PoB-PoE2-build
+lldb -- ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
+(lldb) run
+# crash happens after "before PLoadModule" prints (~30-90s)
+(lldb) thread backtrace
+```
+
+**What to look for:** A named C function (from `libSimpleGraphic.dylib` or a `.so`) between the LuaJIT interpreter frames. That function is the next CClosure to fix.
+
+**Likely candidates** (things Main.lua calls early in its loading):
+- `bit.*` operations — if any `bit.*` functions are CCLosures
+- SOL2-registered `Texture_c` methods (`Texture()` constructor, etc.)
+- C extension module functions (`lcurl`, `lzip`, `lua-utf8`) if called early
+- Any `string.*` or `table.*` built-ins registered with upvalues (rare in LuaJIT)
 
 | File | Role |
 |------|------|
@@ -204,6 +222,7 @@ compiled for macOS and the CI is Windows-only.
 | **JIT** | `luaJIT_setmode` off via C API (`mac_jit_off`); `jit.opt.start` stubbed |
 | **loadfile** | `__mac_loadfile_stash_c` + `MacLoadfile` Lua wrapper |
 | **AfterMain** | `mac_run_after_main_if_requested` runs `LaunchAfterMain.lua` from C after `OnInit` |
+| **ADDFUNCCL CCLosures** (`6b03f97`) | `ConPrintf`, `SetCallback`, `GetCallback`, `SetMainObject`, `NewImageHandle`, `NewArtHandle`, `NewFileSearch` — all converted to LIGHTFUNCs on macOS; upvalue data fetched from `LUA_REGISTRYINDEX` at call time instead of `lua_upvalueindex(1)` |
 
 ---
 
@@ -213,7 +232,7 @@ compiled for macOS and the CI is Windows-only.
 |------|--------|
 | `Launch_oninit_pload.lua` | `PLoadModule("Modules/Main")` OK — `main type=table` |
 | `Launch_stub.lua` | Minimal top chunk + Main load (multi-minute) |
-| **Split `Launch.lua`** | **`PLoadModule main type=table`** in ~30–90 s (AfterMain + Init TBD) |
+| **Split `Launch.lua`** (`6b03f97` engine) | Crashes inside `mac_lightfunc_pcall` before `PLoadModule main type=table` — new CClosure TBD |
 | Monolithic `Launch.lua` (all callbacks in one file) | **Segfault** at Main in &lt;1 s — use split |
 
 ---
@@ -226,6 +245,7 @@ compiled for macOS and the CI is Windows-only.
 4. **Monolithic `Launch.lua` chunk** — all `launch:*` defs before `OnInit` poison VM; split into 3 files.
 5. **`version* = "?"` before `PLoadModule`** — crashes; set placeholders in `LaunchAfterMain.lua` only.
 6. **Fat `OnInit` or `__mac_dofile_c` in `Launch.lua`** — same-chunk bytecode breaks `PLoadModule`; AfterMain runs from **C**.
+7. **Any `lua_pushcclosure(L, f, n)` with n>0** (`ADDFUNCCL`) — creates a CClosure; calling from `lua_resume` coroutine (i.e. `mac_lightfunc_pcall`) crashes arm64 GC64 with `EXC_BAD_ACCESS`. Use `lua_pushcfunction` (LIGHTFUNC) and look up upvalue data at call time from `LUA_REGISTRYINDEX`.
 
 ---
 
