@@ -5,6 +5,120 @@
 //
 
 #include "ui_local.h"
+#if __APPLE__ && __MACH__
+#include <dlfcn.h>
+
+// Light C function replacements for LuaJIT built-ins whose interpreter fast-paths
+// are broken in GC64 mode on arm64. We use the C API lua_pcall (setjmp-based) which
+// is confirmed working, bypassing the broken lj_ff_base_pcall assembly path. (#8)
+
+static int l_mac_pcall(lua_State* L) {
+    // Stack: [f, arg1, ..., argN]
+    int n = lua_gettop(L);
+    if (n < 1) luaL_error(L, "bad argument #1 to 'pcall' (value expected)");
+    int rc = lua_pcall(L, n - 1, LUA_MULTRET, 0);
+    int nret = lua_gettop(L);
+    if (rc == LUA_OK) {
+        lua_pushboolean(L, 1);
+        lua_insert(L, 1);
+        return nret + 1;
+    }
+    lua_pushboolean(L, 0);
+    lua_insert(L, 1);
+    return 2;
+}
+
+static int l_mac_xpcall(lua_State* L) {
+    // Stack: [f, msgh, arg1, ..., argN]
+    int n = lua_gettop(L);
+    if (n < 2) luaL_error(L, "bad argument #2 to 'xpcall' (value expected)");
+    // Swap f and msgh so msgh sits at index 1 (lua_pcall's msgh position)
+    // and f is at index 2 where it needs to be for the nargs-based call.
+    lua_pushvalue(L, 1);   // dup f
+    lua_copy(L, 2, 1);     // overwrite index 1 with msgh
+    lua_replace(L, 2);     // pop dup-f into index 2  → [msgh, f, a1..aN]
+    int rc = lua_pcall(L, n - 2, LUA_MULTRET, 1);
+    int nret = lua_gettop(L) - 1;  // minus the msgh slot that stays
+    lua_remove(L, 1);              // drop msgh
+    if (rc == LUA_OK) {
+        lua_pushboolean(L, 1);
+        lua_insert(L, 1);
+        return nret + 1;
+    }
+    lua_pushboolean(L, 0);
+    lua_insert(L, 1);
+    return 2;
+}
+
+// Light C function replacement for LuaJIT built-in require().
+// LuaJIT 2.1 arm64 interpreter crashes when Lua bytecode calls any GC C closure
+// via GGET+CALL (e.g. require, which has upvalues → allocated as CClosure).
+// Replacing it with a LIGHTFUNC (no GC allocation) and calling all loaders via
+// the C API avoids the broken interpreter path entirely. (#8)
+static int l_mac_require(lua_State* L) {
+    const char* modname = luaL_checkstring(L, 1);
+    lua_settop(L, 1);  // [1]=modname
+
+    lua_getglobal(L, "package");        // [1,2]  2=package
+    if (!lua_istable(L, -1))
+        luaL_error(L, "l_mac_require: 'package' is %s (expected table)", luaL_typename(L, -1));
+    lua_getfield(L, -1, "loaded");      // [1,2,3]  3=loaded
+    if (!lua_istable(L, -1))
+        luaL_error(L, "l_mac_require: 'package.loaded' is %s (expected table)", luaL_typename(L, -1));
+    lua_getfield(L, 2, "preload");     // [1,2,3,4]  4=preload
+
+    // 1. Return immediately if already loaded.
+    lua_getfield(L, 3, modname);
+    if (!lua_isnil(L, -1)) return 1;
+    lua_pop(L, 1);
+
+    // 2. Call package.preload[modname] if present.
+    lua_getfield(L, 4, modname);
+    if (lua_isfunction(L, -1)) {
+        lua_pushvalue(L, 1);            // pass modname as arg
+        lua_call(L, 1, 1);             // loader(modname) → result
+        if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
+        lua_pushvalue(L, -1);
+        lua_setfield(L, 3, modname);   // package.loaded[modname] = result
+        return 1;
+    }
+    lua_pop(L, 1);
+
+    // 3. Search package.path for .lua files.
+    lua_getfield(L, 2, "path");
+    const char* pathcstr = lua_tostring(L, -1);
+    std::string path(pathcstr ? pathcstr : "");
+    lua_pop(L, 1);
+
+    std::string modpath(modname);
+    for (char& c : modpath) if (c == '.') c = '/';
+
+    std::string tried;
+    size_t pos = 0;
+    while (pos <= path.size()) {
+        size_t semi = path.find(';', pos);
+        if (semi == std::string::npos) semi = path.size();
+        std::string tmpl = path.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (tmpl.empty()) continue;
+        size_t q = tmpl.find('?');
+        if (q != std::string::npos) tmpl.replace(q, 1, modpath);
+        if (luaL_loadfile(L, tmpl.c_str()) == LUA_OK) {
+            lua_pushvalue(L, 1);
+            lua_call(L, 1, 1);
+            if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
+            lua_pushvalue(L, -1);
+            lua_setfield(L, 3, modname);
+            return 1;
+        }
+        tried += "\n\tno file '"; tried += tmpl; tried += "'";
+        lua_pop(L, 1);  // pop load error
+    }
+
+    luaL_error(L, "module '%s' not found:%s", modname, tried.c_str());
+    return 0;
+}
+#endif
 
 // ======
 // Locals
@@ -145,6 +259,27 @@ int ui_main_c::PushCallback(const char* name)
 	}
 	return -1;
 }
+
+#if __APPLE__ && __MACH__
+void ui_main_c::CallCallbackOnThread(int extraArgs)
+{
+	const int funcIdx = lua_gettop(L) - extraArgs;
+	lua_State* co = lua_newthread(L);
+	lua_pushvalue(L, 1);
+	lua_xmove(L, co, 1);
+	for (int i = extraArgs; i >= 0; --i) {
+		lua_pushvalue(L, funcIdx + i);
+	}
+	lua_xmove(L, co, extraArgs + 1);
+	lua_pop(L, 1);
+	const int err = lua_pcall(co, extraArgs, 0, 1);
+	if (err && !didExit) {
+		const char* msg = lua_tostring(co, -1);
+		DoError("Runtime error in", msg ? msg : "unknown");
+	}
+	lua_settop(L, 1);
+}
+#endif
 
 void ui_main_c::PCall(int narg, int nret)
 {
@@ -350,18 +485,61 @@ void ui_main_c::ScriptInit()
 	lua_gc(L, LUA_GCRESTART, -1);
 
 #if __APPLE__ && __MACH__
-	// LuaJIT arm64 JIT faults during PoB startup (#8). Launch.lua calls jit.opt.start(); keep JIT off.
-	static char const* const kDisableJit =
+	// Launch.lua calls jit.opt.start() which crashed the interpreter via a broken GC64 path.
+	// Keep JIT ON (it generates correct native code for GC function calls, unlike the
+	// interpreter's CALL dispatch which is broken for GC64 pointers on arm64). Only stub
+	// jit.opt.start so PoB's call to it is harmless. (#8)
+	static char const* const kMacJit =
 		"if jit then "
-		"jit.off() "
 		"jit.opt.start = function(...) end "
 		"end";
-	if (luaL_dostring(L, kDisableJit) != LUA_OK) {
-		sys->con->Printf("Warning: macOS JIT disable failed: %s\n", lua_tostring(L, -1));
+	if (luaL_dostring(L, kMacJit) != LUA_OK) {
+		sys->con->Printf("Warning: macOS JIT stub failed: %s\n", lua_tostring(L, -1));
 		lua_pop(L, 1);
 	} else {
-		sys->con->Printf("LuaJIT JIT disabled on macOS (interpreter mode).\n");
+		sys->con->Printf("LuaJIT JIT enabled on macOS (jit.opt.start stubbed).\n");
 	}
+
+	// LuaJIT 2.1 arm64 interpreter crashes when Lua bytecode calls any function
+	// stored in a GC heap table (e.g. package.loadlib, package.loaders entries).
+	// Pre-register C extensions in package.preload via the C API so require()
+	// finds them through the C-side preload path, bypassing the broken interpreter
+	// table-call path. (#8)
+	{
+		struct LuaCExt { const char* module; const char* sym; const char* file; };
+		static const LuaCExt kExts[] = {
+			{ "lcurl.safe", "luaopen_lcurl_safe", "lcurl.so"    },
+			{ "lcurl",      "luaopen_lcurl",      "lcurl.so"    },
+			{ "lzip",       "luaopen_lzip",       "lzip.so"     },
+			{ "lua-utf8",   "luaopen_utf8",       "lua-utf8.so" },
+		};
+		lua_getglobal(L, "package");
+		lua_getfield(L, -1, "preload");
+		for (const auto& ext : kExts) {
+			auto soPath = (sys->basePath / ext.file).lexically_normal();
+			void* handle = dlopen(soPath.generic_u8string().c_str(), RTLD_NOW | RTLD_LOCAL);
+			if (handle) {
+				auto fn = reinterpret_cast<lua_CFunction>(dlsym(handle, ext.sym));
+				if (fn) {
+					lua_pushcfunction(L, fn);
+					lua_setfield(L, -2, ext.module);
+				} else {
+					sys->con->Printf("Warning: macOS preload: symbol %s not found in %s\n", ext.sym, ext.file);
+				}
+			} else {
+				sys->con->Printf("Warning: macOS preload: dlopen %s failed: %s\n", ext.file, dlerror());
+			}
+		}
+		lua_pop(L, 2); // preload table, package table
+	}
+
+	// Replace built-ins that are GC closures (or use broken fast-paths) in arm64 GC64.
+	// With JIT on the built-in pcall/xpcall become GC functions whose GGET+CALL crashes;
+	// our LIGHTFUNC replacements avoid that. (#8)
+	lua_pushcfunction(L, l_mac_require); lua_setglobal(L, "require");
+	lua_pushcfunction(L, l_mac_pcall);   lua_setglobal(L, "pcall");
+	lua_pushcfunction(L, l_mac_xpcall);  lua_setglobal(L, "xpcall");
+	sys->con->Printf("macOS: require/pcall/xpcall replaced with LIGHTFUNCs.\n");
 #endif
 
 	// Setup debug system
@@ -406,11 +584,11 @@ void ui_main_c::ScriptInit()
 	if ( !didExit && !restartFlag ) {
 		// Check for frame callback
 		int extraArgs = PushCallback("OnFrame");
-		if (extraArgs >= 0) {
-			lua_pop(L, 1 + extraArgs);
-		} else {
+		if (extraArgs < 0) {
 			sys->con->Printf("\nScript didn't set frame callback, exiting...\n");
 			sys->Exit();
+		} else if (lua_gettop(L) > 1 && lua_isfunction(L, 1)) {
+			lua_settop(L, 1);
 		}
 	}
 }
@@ -562,7 +740,7 @@ bool ui_main_c::CanExit()
 
 void ui_main_c::KeyEvent(int key, int type)
 {
-	if (conUI->KeyEvent(key, type)) {
+	if (conUI && conUI->KeyEvent(key, type)) {
 		return;
 	}
 
@@ -577,7 +755,9 @@ void ui_main_c::KeyEvent(int key, int type)
 	case KE_KEYUP:
 		switch (key) {
 		case KEY_F10:
-			renderer->ToggleDebugImGui();
+			if (renderer) {
+				renderer->ToggleDebugImGui();
+			}
 			break;
 		case KEY_PAUSE:
 			if (sys->IsKeyDown(KEY_SHIFT)) {

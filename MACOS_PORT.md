@@ -442,3 +442,20 @@ Target command: `brew install --cask path-of-building-2`
 - **2026-05-22** — Merged `macos/issue-6-runtime-layout` → `macos-port`; aligned
   `docs/macos/issue-6-runtime-layout.md` with `macos_bundle_runtime.cmake` (Part B3) and
   clarified #6 enables but does not close #8.
+- **2026-05-23** — [#8] Two LuaJIT arm64 GC64 interpreter bugs identified and partially
+  fixed. **Bug #1** (fixed): interpreter CALL dispatch for GC C closures corrupts BASE in
+  GC64 mode (`ldur w16, [x21, #-0x4]`, x21 = GC64-tagged pointer). Fix: enable JIT (JIT
+  generates correct native code for GC function calls); replace `pcall`/`xpcall`/`require`
+  globals with C LIGHTFUNCs (`lua_pushcfunction`) so interpreter never does a GC-closure
+  CALL. Pre-register C extensions (`lcurl`, `lzip`, `lua-utf8`) in `package.preload` via
+  `dlopen`/`dlsym` at init time. Stub `jit.opt.start = function(...) end` to avoid its
+  broken interpreter path. **Bug #2** (pending): `lua_pcall` called from inside
+  `l_mac_pcall` (a LIGHTFUNC) completes successfully (rc=0), but the interpreter crashes
+  on return from the LIGHTFUNC. Root cause: `lua_pcall` modifies LuaJIT internal state
+  (likely GC64-encoded `L->base` in the cframe) in a way that corrupts the interpreter's
+  BASE register when `l_mac_pcall` returns. The crash is NOT inside `lua_pcall` itself and
+  NOT inside `l_mac_pcall`'s stack manipulation — it is in the interpreter's LIGHTFUNC
+  return-dispatch path. **Next fix to try**: replace `lua_pcall` inside `l_mac_pcall` with
+  `lua_resume` (coroutine-based protection), which uses entirely different internal stack
+  semantics and may not corrupt interpreter state. See `ui_main.cpp` `l_mac_pcall` for the
+  implementation to try next session.

@@ -65,6 +65,9 @@ public:
 	int		IsUserData(lua_State* L, int index, const char* metaName);
 	int		PushCallback(const char* name);
 	void	PCall(int narg, int nret);
+#if __APPLE__ && __MACH__
+	void	CallCallbackOnThread(int extraArgs);
+#endif
 	void	DoError(const char* msg, const char* error);
 
 	void	CallKeyHandler(const char* hname, int key, bool dblclk);
