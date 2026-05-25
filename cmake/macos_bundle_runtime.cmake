@@ -1,8 +1,8 @@
-# Installed by CMake install(SCRIPT) on APPLE — copies vcpkg runtime dylibs next to PoB binaries.
-# CMAKE_INSTALL_PREFIX and paths below are substituted at configure time.
+# Installed by CMake install(SCRIPT) on APPLE — copies vcpkg runtime dylibs into
+# the .app bundle's Contents/Frameworks/. Paths are substituted at configure time.
 
 set(_sg_lib_dir "@MACOS_BUNDLE_LIB_DIR@")
-set(_install_prefix "${CMAKE_INSTALL_PREFIX}")
+set(_fw_dir "@MACOS_BUNDLE_FRAMEWORKS_DEST@")
 set(_built_libs
     "@MACOS_BUNDLE_SG_DYLIB@"
     "@MACOS_BUNDLE_LCURL@"
@@ -30,9 +30,9 @@ endif ()
 
 foreach (_dep IN LISTS _resolved)
     get_filename_component(_dep_name "${_dep}" NAME)
-    set(_dest "${_install_prefix}/${_dep_name}")
+    set(_dest "${_fw_dir}/${_dep_name}")
     if (NOT EXISTS "${_dest}")
-        file(INSTALL "${_dep}" DESTINATION "${_install_prefix}" FOLLOW_SYMLINK_CHAIN)
+        file(INSTALL "${_dep}" DESTINATION "${_fw_dir}" FOLLOW_SYMLINK_CHAIN)
         message(STATUS "Bundled runtime: ${_dep_name}")
     endif ()
 endforeach ()
@@ -44,8 +44,8 @@ foreach (_pair IN ITEMS
 )
     list(GET _pair 0 _egl_link)
     list(GET _pair 1 _egl_target)
-    set(_egl_target_path "${_install_prefix}/${_egl_target}")
-    set(_egl_link_path "${_install_prefix}/${_egl_link}")
+    set(_egl_target_path "${_fw_dir}/${_egl_target}")
+    set(_egl_link_path "${_fw_dir}/${_egl_link}")
     if (EXISTS "${_egl_target_path}" AND NOT EXISTS "${_egl_link_path}")
         file(CREATE_LINK "${_egl_target}" "${_egl_link_path}" SYMBOLIC)
         message(STATUS "EGL alias: ${_egl_link} -> ${_egl_target}")

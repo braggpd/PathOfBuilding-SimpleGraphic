@@ -263,22 +263,33 @@ target_link_libraries(SimpleGraphic
 
 if (APPLE)
     set(PoB_HOST_TARGET pob-host)
+    set(MACOS_APP_NAME "Path of Building 2")
+    set(MACOS_FW_DEST "${MACOS_APP_NAME}.app/Contents/Frameworks")
     add_executable(${PoB_HOST_TARGET} mac/host.cpp)
     set_target_properties(${PoB_HOST_TARGET} PROPERTIES
         OUTPUT_NAME "Path of Building-PoE2"
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "${MACOS_APP_NAME}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.braggpd.PathOfBuilding2"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.15.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.15.0"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/mac/Info.plist.in"
+        BUILD_RPATH "@executable_path;@loader_path"
+        INSTALL_RPATH "@executable_path/../Frameworks"
+        MACOSX_RPATH ON
     )
     target_link_libraries(${PoB_HOST_TARGET} PRIVATE SimpleGraphic)
-    set_target_properties(SimpleGraphic ${PoB_HOST_TARGET}
+    set_target_properties(SimpleGraphic
         PROPERTIES
             BUILD_RPATH "@executable_path;@loader_path"
-            INSTALL_RPATH "@executable_path;@loader_path"
+            INSTALL_RPATH "@loader_path"
             MACOSX_RPATH ON
     )
 endif ()
 
 if (APPLE)
-    install(TARGETS SimpleGraphic LIBRARY DESTINATION ".")
-    install(TARGETS ${PoB_HOST_TARGET} RUNTIME DESTINATION ".")
+    install(TARGETS ${PoB_HOST_TARGET} BUNDLE DESTINATION ".")
+    install(TARGETS SimpleGraphic LIBRARY DESTINATION "${MACOS_FW_DEST}")
 else ()
     install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
 endif ()
@@ -336,7 +347,7 @@ if (APPLE)
     set_target_properties(lcurl PROPERTIES PREFIX "" SUFFIX ".so")
 endif ()
 if (APPLE)
-    install(TARGETS lcurl LIBRARY DESTINATION ".")
+    install(TARGETS lcurl LIBRARY DESTINATION "${MACOS_FW_DEST}")
 else ()
     install(TARGETS lcurl RUNTIME DESTINATION ".")
 endif ()
@@ -363,7 +374,7 @@ if (APPLE)
     set_target_properties(lua-utf8 PROPERTIES PREFIX "" SUFFIX ".so")
 endif ()
 if (APPLE)
-    install(TARGETS lua-utf8 LIBRARY DESTINATION ".")
+    install(TARGETS lua-utf8 LIBRARY DESTINATION "${MACOS_FW_DEST}")
 else ()
     install(TARGETS lua-utf8 RUNTIME DESTINATION ".")
 endif ()
@@ -411,7 +422,7 @@ if (APPLE)
     set_target_properties(luasocket PROPERTIES PREFIX "" SUFFIX ".so")
 endif ()
 if (APPLE)
-    install(TARGETS luasocket LIBRARY DESTINATION ".")
+    install(TARGETS luasocket LIBRARY DESTINATION "${MACOS_FW_DEST}")
 else ()
     install(TARGETS luasocket RUNTIME DESTINATION ".")
 endif ()
@@ -435,17 +446,18 @@ if (APPLE)
     set_target_properties(lzip PROPERTIES PREFIX "" SUFFIX ".so")
 endif ()
 if (APPLE)
-    install(TARGETS lzip LIBRARY DESTINATION ".")
+    install(TARGETS lzip LIBRARY DESTINATION "${MACOS_FW_DEST}")
 else ()
     install(TARGETS lzip RUNTIME DESTINATION ".")
 endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:lzip> DESTINATION ".")
 
 if (APPLE)
+    # Lua modules sit in Contents/Frameworks/ next to SimpleGraphic; @loader_path finds siblings.
     set_target_properties(lcurl luasocket lzip lua-utf8
         PROPERTIES
             BUILD_RPATH "@executable_path;@loader_path"
-            INSTALL_RPATH "@executable_path;@loader_path"
+            INSTALL_RPATH "@loader_path"
             MACOSX_RPATH ON
     )
 
@@ -456,6 +468,8 @@ if (APPLE)
     set(MACOS_BUNDLE_SOCKET "${CMAKE_CURRENT_BINARY_DIR}/socket.so")
     set(MACOS_BUNDLE_LZIP "${CMAKE_CURRENT_BINARY_DIR}/lzip.so")
     set(MACOS_BUNDLE_UTF8 "${CMAKE_CURRENT_BINARY_DIR}/lua-utf8.so")
+    # Absolute path where vcpkg runtime deps are copied at install time.
+    set(MACOS_BUNDLE_FRAMEWORKS_DEST "${CMAKE_INSTALL_PREFIX}/${MACOS_FW_DEST}")
     set(_macos_bundle_script "${CMAKE_CURRENT_BINARY_DIR}/macos_bundle_runtime.cmake")
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos_bundle_runtime.cmake"
@@ -463,4 +477,17 @@ if (APPLE)
         @ONLY
     )
     install(SCRIPT "${_macos_bundle_script}")
+
+    # Ad-hoc sign the bundle so Gatekeeper allows it (#11).
+    # Users launching for the first time may need to right-click → Open.
+    install(CODE "
+        execute_process(
+            COMMAND codesign --deep --force --sign -
+                \"${CMAKE_INSTALL_PREFIX}/${MACOS_APP_NAME}.app\"
+            RESULT_VARIABLE _codesign_result
+        )
+        if(NOT _codesign_result EQUAL 0)
+            message(WARNING \"codesign returned \${_codesign_result} — bundle may not be trusted\")
+        endif()
+    ")
 endif ()
