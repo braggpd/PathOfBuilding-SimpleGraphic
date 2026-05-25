@@ -2075,21 +2075,14 @@ static int l_LoadModule(lua_State* L)
 		           lua_tostring(L, -1));
 	}
 	lua_replace(L, 1);
-	// Use lua_call (unprotected) so nested LoadModule chains don't stack lua_pcall frames.
-	// Errors propagate to the nearest lua_pcall protection (PLoadModule's frame). (#8)
-	lua_call(L, extraArgs, LUA_MULTRET);
-	const int nret = lua_gettop(L);
-	lua_createtable(L, 0, 4);
-	lua_pushinteger(L, nret > 0 ? 1 : 0);
-	lua_setfield(L, -2, "n");
-	for (int i = 0; i < 3 && i < nret; i++) {
-		lua_pushvalue(L, i + 1);
-		lua_setfield(L, -2, i == 0 ? "r1" : (i == 1 ? "r2" : "r3"));
+	// lua_call crashes 2+ levels deep in a coroutine on arm64 GC64 (NULL+0x28 in lj_vm_call).
+	// lua_pcall is safe here: PLoadModule uses lua_resume (mac_pload_coroutine_call) as the
+	// outer frame, so there is no nested lua_resume inside this lua_pcall. (#8)
+	const int perr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
+	if (perr != LUA_OK) {
+		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(), lua_tostring(L, -1));
 	}
-	lua_pushvalue(L, 1);
-	lua_setglobal(L, "__mac_loadmodule_result");
-	lua_settop(L, 0);
-	return 0;
+	return lua_gettop(L);
 }
 
 // Stack: [modName, optional extra args...]. Sets __mac_pload_result; clears stack. (#8)
