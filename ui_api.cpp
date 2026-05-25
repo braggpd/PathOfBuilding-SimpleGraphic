@@ -2115,19 +2115,14 @@ static bool mac_run_pload_module_impl(lua_State* L, ui_main_c* ui, int extraArgs
 		return false;
 	}
 	lua_replace(L, 1);
-	// Use lua_pcall instead of mac_lightfunc_pcall to avoid deep coroutine nesting
-	// that hangs on arm64 GC64 (Main.lua calls LoadModule which calls require). (#8)
-	lua_getfield(L, LUA_REGISTRYINDEX, "traceback");
-	lua_insert(L, 1);
-	const int perr = lua_pcall(L, extraArgs, LUA_MULTRET, 1);
-	lua_remove(L, 1); // drop traceback
-	if (perr != LUA_OK) {
-		lua_pushboolean(L, 0);
-		lua_insert(L, 1);
-	} else {
-		lua_pushboolean(L, 1);
-		lua_insert(L, 1);
-	}
+	// Use mac_lightfunc_pcall (coroutine) so LoadModule can safely use lua_call.
+	// lua_call-inside-lua_pcall on the main state crashes arm64 GC64 (NULL+0x28 deref in
+	// lj_vm_call — cframe chain invalid without an outer setjmp frame from lua_resume).
+	// lua_pcall 3+ deep hangs. A fresh coroutine has its own cframe base, avoiding both.
+	// Safe here: called from C top level in mac_run_after_main_if_requested, not inside
+	// any lua_pcall frame. l_mac_pcall/require use lua_pcall (no nested lua_resume). (#8)
+	mac_lightfunc_pcall(L, extraArgs);
+	// mac_lightfunc_pcall leaves [bool, results...] — same layout expected by mac_push_plm_result.
 	const bool ok = lua_toboolean(L, 1);
 	ui->sys->con->Printf("macOS: PLoadModule %s %s\n", fileStr.c_str(), ok ? "OK" : "failed");
 	mac_push_plm_result(L, ok, 2);
