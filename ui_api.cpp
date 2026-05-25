@@ -2075,14 +2075,9 @@ static int l_LoadModule(lua_State* L)
 		           lua_tostring(L, -1));
 	}
 	lua_replace(L, 1);
-	ui->sys->con->Printf("macOS: LoadModule running %s\n", fileStr.c_str());
-	// Run the loaded chunk via lua_pcall (matching PLoadModule). Nested LoadModule
-	// calls work because pcall/xpcall/require all use lua_pcall (not lua_resume). (#8)
-	const int perr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
-	if (perr != LUA_OK) {
-		const char* msg = lua_tostring(L, -1);
-		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(), msg ? msg : "unknown");
-	}
+	// Use lua_call (unprotected) so nested LoadModule chains don't stack lua_pcall frames.
+	// Errors propagate to the nearest lua_pcall protection (PLoadModule's frame). (#8)
+	lua_call(L, extraArgs, LUA_MULTRET);
 	const int nret = lua_gettop(L);
 	lua_createtable(L, 0, 4);
 	lua_pushinteger(L, nret > 0 ? 1 : 0);
