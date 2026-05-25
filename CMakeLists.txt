@@ -263,7 +263,8 @@ target_link_libraries(SimpleGraphic
 
 if (APPLE)
     set(PoB_HOST_TARGET pob-host)
-    set(MACOS_APP_NAME "Path of Building 2")
+    # Bundle dir name is driven by OUTPUT_NAME, not BUNDLE_NAME. Keep in sync.
+    set(MACOS_APP_NAME "Path of Building-PoE2")
     set(MACOS_FW_DEST "${MACOS_APP_NAME}.app/Contents/Frameworks")
     add_executable(${PoB_HOST_TARGET} mac/host.cpp)
     set_target_properties(${PoB_HOST_TARGET} PROPERTIES
