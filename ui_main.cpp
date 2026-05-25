@@ -73,6 +73,447 @@ void mac_jit_off(lua_State* L) {
 	luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH);
 }
 
+// LuaJIT arm64 FFUNC replacement: LJLIB_ASM fast functions have broken assembly
+// dispatch on arm64 GC64. Functions with lua_tocfunction() != NULL (LJLIB_CF)
+// are re-registered as LIGHTFUNCs. Functions returning NULL need manual C
+// implementations. (#8)
+//
+// Converts one function: if LJLIB_ASM (tocfunction==NULL), skip (needs manual).
+// If LJLIB_CF, re-register as LIGHTFUNC.
+static int mac_convert_cfunc_in_table(lua_State* L, sys_IMain* sys,
+    const char* tblName, int tblIdx)
+{
+    int converted = 0;
+    lua_pushnil(L);
+    while (lua_next(L, tblIdx) != 0) {
+        if (lua_type(L, -1) == LUA_TFUNCTION && lua_iscfunction(L, -1)) {
+            lua_CFunction cfn = lua_tocfunction(L, -1);
+            if (cfn) {
+                // CClosures with upvalues must keep them — skip
+                const char* upname = lua_getupvalue(L, -1, 1);
+                if (upname) {
+                    lua_pop(L, 2); // pop upvalue value + function value, keep key
+                    continue;
+                }
+                lua_pop(L, 1); // pop value
+                lua_pushcfunction(L, cfn);
+                const char* key = lua_isstring(L, -2) ? lua_tostring(L, -2) : nullptr;
+                if (key) {
+                    lua_setfield(L, tblIdx, key);
+                    converted++;
+                } else {
+                    lua_pop(L, 1);
+                }
+            } else {
+                lua_pop(L, 1); // pop value, keep key
+            }
+        } else {
+            lua_pop(L, 1); // pop value, keep key
+        }
+    }
+    return converted;
+}
+
+// Manual LIGHTFUNC replacements for LJLIB_ASM functions (tocfunction==NULL).
+static int mac_lf_tostring(lua_State* L) {
+    luaL_checkany(L, 1);
+    if (luaL_callmeta(L, 1, "__tostring")) return 1;
+    switch (lua_type(L, 1)) {
+        case LUA_TNIL: lua_pushliteral(L, "nil"); break;
+        case LUA_TBOOLEAN: lua_pushstring(L, lua_toboolean(L, 1) ? "true" : "false"); break;
+        case LUA_TNUMBER: {
+            char buf[64];
+            if (lua_isinteger(L, 1))
+                snprintf(buf, sizeof(buf), "%lld", (long long)lua_tointeger(L, 1));
+            else
+                snprintf(buf, sizeof(buf), "%.14g", lua_tonumber(L, 1));
+            lua_pushstring(L, buf);
+            break;
+        }
+        case LUA_TSTRING: lua_pushvalue(L, 1); break;
+        default:
+            lua_pushfstring(L, "%s: %p", luaL_typename(L, 1), lua_topointer(L, 1));
+            break;
+    }
+    return 1;
+}
+
+static int mac_lf_tonumber(lua_State* L) {
+    int base = (int)luaL_optinteger(L, 2, 10);
+    if (base == 10) {
+        luaL_checkany(L, 1);
+        if (lua_type(L, 1) == LUA_TNUMBER) {
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        const char* s = lua_tostring(L, 1);
+        if (s) {
+            char* end;
+            double d = strtod(s, &end);
+            if (end != s && *end == '\0') { lua_pushnumber(L, d); return 1; }
+            while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
+            if (*end == '\0' && end != s) { lua_pushnumber(L, d); return 1; }
+        }
+        lua_pushnil(L);
+        return 1;
+    }
+    const char* s = luaL_checkstring(L, 1);
+    luaL_argcheck(L, base >= 2 && base <= 36, 2, "base out of range");
+    char* end;
+    unsigned long long r = strtoull(s, &end, base);
+    while (*end == ' ' || *end == '\t') end++;
+    if (end == s || *end != '\0') { lua_pushnil(L); return 1; }
+    lua_pushnumber(L, (lua_Number)r);
+    return 1;
+}
+
+static int mac_lf_assert(lua_State* L) {
+    if (!lua_toboolean(L, 1)) {
+        const char* msg = lua_isstring(L, 2) ? lua_tostring(L, 2) : "assertion failed!";
+        return luaL_error(L, "%s", msg);
+    }
+    return lua_gettop(L);
+}
+
+static int mac_lf_next(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_settop(L, 2);
+    if (lua_next(L, 1)) return 2;
+    lua_pushnil(L);
+    return 1;
+}
+
+static int mac_lf_rawget(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checkany(L, 2);
+    lua_rawget(L, 1);
+    return 1;
+}
+
+static int mac_lf_rawlen(lua_State* L) {
+    int t = lua_type(L, 1);
+    luaL_argcheck(L, t == LUA_TTABLE || t == LUA_TSTRING, 1, "table or string expected");
+    lua_pushinteger(L, (lua_Integer)lua_rawlen(L, 1));
+    return 1;
+}
+
+static int mac_lf_setmetatable(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int t2 = lua_type(L, 2);
+    luaL_argcheck(L, t2 == LUA_TNIL || t2 == LUA_TTABLE, 2, "nil or table expected");
+    lua_settop(L, 2);
+    lua_setmetatable(L, 1);
+    lua_settop(L, 1);
+    return 1;
+}
+
+static int mac_lf_getmetatable(lua_State* L) {
+    luaL_checkany(L, 1);
+    if (!lua_getmetatable(L, 1)) { lua_pushnil(L); return 1; }
+    lua_getfield(L, -1, "__metatable");
+    if (!lua_isnil(L, -1)) return 1;
+    lua_pop(L, 1);
+    return 1;
+}
+
+static int mac_lf_rawequal(lua_State* L) {
+    luaL_checkany(L, 1);
+    luaL_checkany(L, 2);
+    lua_pushboolean(L, lua_rawequal(L, 1, 2));
+    return 1;
+}
+
+static int mac_lf_collectgarbage(lua_State* L) {
+    static const char* const opts[] = {
+        "stop", "restart", "collect", "count", "step",
+        "setpause", "setstepmul", "isrunning", nullptr
+    };
+    static const int optsnum[] = {
+        LUA_GCSTOP, LUA_GCRESTART, LUA_GCCOLLECT, LUA_GCCOUNT, LUA_GCSTEP,
+        LUA_GCSETPAUSE, LUA_GCSETSTEPMUL, 9/*LUA_GCISRUNNING*/
+    };
+    int o = luaL_checkoption(L, 1, "collect", opts);
+    int ex = (int)luaL_optinteger(L, 2, 0);
+    int res = lua_gc(L, optsnum[o], ex);
+    if (o == 3) { // count
+        int b = lua_gc(L, LUA_GCCOUNTB, 0);
+        lua_pushnumber(L, (lua_Number)res + (lua_Number)b / 1024.0);
+        return 1;
+    }
+    lua_pushinteger(L, res);
+    return 1;
+}
+
+// String library LJLIB_ASM replacements
+static int mac_lf_string_byte(lua_State* L) {
+    size_t len;
+    const char* s = luaL_checklstring(L, 1, &len);
+    lua_Integer pi = luaL_optinteger(L, 2, 1);
+    lua_Integer pj = luaL_optinteger(L, 3, pi);
+    if (pi < 0) pi += (lua_Integer)len + 1;
+    if (pj < 0) pj += (lua_Integer)len + 1;
+    if (pi < 1) pi = 1;
+    if (pj > (lua_Integer)len) pj = (lua_Integer)len;
+    int n = 0;
+    for (lua_Integer i = pi; i <= pj; i++) {
+        lua_pushinteger(L, (unsigned char)s[i - 1]);
+        n++;
+    }
+    return n;
+}
+
+static int mac_lf_string_char(lua_State* L) {
+    int n = lua_gettop(L);
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    for (int i = 1; i <= n; i++) {
+        int c = (int)luaL_checkinteger(L, i);
+        luaL_argcheck(L, (unsigned int)c <= 255, i, "invalid value");
+        luaL_addchar(&b, (char)c);
+    }
+    luaL_pushresult(&b);
+    return 1;
+}
+
+static int mac_lf_string_len(lua_State* L) {
+    size_t len;
+    luaL_checklstring(L, 1, &len);
+    lua_pushinteger(L, (lua_Integer)len);
+    return 1;
+}
+
+static int mac_lf_string_sub(lua_State* L) {
+    size_t len;
+    const char* s = luaL_checklstring(L, 1, &len);
+    lua_Integer start = luaL_checkinteger(L, 2);
+    lua_Integer end = luaL_optinteger(L, 3, -1);
+    if (start < 0) start += (lua_Integer)len + 1;
+    if (end < 0) end += (lua_Integer)len + 1;
+    if (start < 1) start = 1;
+    if (end > (lua_Integer)len) end = (lua_Integer)len;
+    if (start > end) { lua_pushliteral(L, ""); return 1; }
+    lua_pushlstring(L, s + start - 1, (size_t)(end - start + 1));
+    return 1;
+}
+
+static int mac_lf_string_rep(lua_State* L) {
+    size_t len;
+    const char* s = luaL_checklstring(L, 1, &len);
+    int n = (int)luaL_checkinteger(L, 2);
+    if (n <= 0) { lua_pushliteral(L, ""); return 1; }
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    while (n-- > 0) luaL_addlstring(&b, s, len);
+    luaL_pushresult(&b);
+    return 1;
+}
+
+static int mac_lf_string_reverse(lua_State* L) {
+    size_t len;
+    const char* s = luaL_checklstring(L, 1, &len);
+    luaL_Buffer b;
+    char* p = luaL_buffinitsize(L, &b, len);
+    for (size_t i = 0; i < len; i++) p[i] = s[len - 1 - i];
+    luaL_pushresultsize(&b, len);
+    return 1;
+}
+
+static int mac_lf_string_lower(lua_State* L) {
+    size_t len;
+    const char* s = luaL_checklstring(L, 1, &len);
+    luaL_Buffer b;
+    char* p = luaL_buffinitsize(L, &b, len);
+    for (size_t i = 0; i < len; i++) p[i] = (char)tolower((unsigned char)s[i]);
+    luaL_pushresultsize(&b, len);
+    return 1;
+}
+
+static int mac_lf_string_upper(lua_State* L) {
+    size_t len;
+    const char* s = luaL_checklstring(L, 1, &len);
+    luaL_Buffer b;
+    char* p = luaL_buffinitsize(L, &b, len);
+    for (size_t i = 0; i < len; i++) p[i] = (char)toupper((unsigned char)s[i]);
+    luaL_pushresultsize(&b, len);
+    return 1;
+}
+
+// Math library LJLIB_ASM replacements
+static int mac_lf_math_abs(lua_State* L) { lua_pushnumber(L, fabs(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_floor(lua_State* L) { lua_pushnumber(L, floor(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_ceil(lua_State* L) { lua_pushnumber(L, ceil(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_sqrt(lua_State* L) { lua_pushnumber(L, sqrt(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_log(lua_State* L) { lua_pushnumber(L, log(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_log10(lua_State* L) { lua_pushnumber(L, log10(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_exp(lua_State* L) { lua_pushnumber(L, exp(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_sin(lua_State* L) { lua_pushnumber(L, sin(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_cos(lua_State* L) { lua_pushnumber(L, cos(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_tan(lua_State* L) { lua_pushnumber(L, tan(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_asin(lua_State* L) { lua_pushnumber(L, asin(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_acos(lua_State* L) { lua_pushnumber(L, acos(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_atan(lua_State* L) { lua_pushnumber(L, atan(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_atan2(lua_State* L) { lua_pushnumber(L, atan2(luaL_checknumber(L, 1), luaL_checknumber(L, 2))); return 1; }
+static int mac_lf_math_sinh(lua_State* L) { lua_pushnumber(L, sinh(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_cosh(lua_State* L) { lua_pushnumber(L, cosh(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_tanh(lua_State* L) { lua_pushnumber(L, tanh(luaL_checknumber(L, 1))); return 1; }
+static int mac_lf_math_pow(lua_State* L) { lua_pushnumber(L, pow(luaL_checknumber(L, 1), luaL_checknumber(L, 2))); return 1; }
+static int mac_lf_math_fmod(lua_State* L) { lua_pushnumber(L, fmod(luaL_checknumber(L, 1), luaL_checknumber(L, 2))); return 1; }
+static int mac_lf_math_max(lua_State* L) {
+    int n = lua_gettop(L);
+    luaL_argcheck(L, n >= 1, 1, "value expected");
+    lua_Number m = luaL_checknumber(L, 1);
+    for (int i = 2; i <= n; i++) { lua_Number v = luaL_checknumber(L, i); if (v > m) m = v; }
+    lua_pushnumber(L, m);
+    return 1;
+}
+static int mac_lf_math_min(lua_State* L) {
+    int n = lua_gettop(L);
+    luaL_argcheck(L, n >= 1, 1, "value expected");
+    lua_Number m = luaL_checknumber(L, 1);
+    for (int i = 2; i <= n; i++) { lua_Number v = luaL_checknumber(L, i); if (v < m) m = v; }
+    lua_pushnumber(L, m);
+    return 1;
+}
+static int mac_lf_math_frexp(lua_State* L) {
+    int e; lua_pushnumber(L, frexp(luaL_checknumber(L, 1), &e));
+    lua_pushinteger(L, e); return 2;
+}
+static int mac_lf_math_ldexp(lua_State* L) {
+    lua_pushnumber(L, ldexp(luaL_checknumber(L, 1), (int)luaL_checkinteger(L, 2))); return 1;
+}
+static int mac_lf_math_modf(lua_State* L) {
+    double ip; double fp = modf(luaL_checknumber(L, 1), &ip);
+    lua_pushnumber(L, ip); lua_pushnumber(L, fp); return 2;
+}
+static int mac_lf_math_deg(lua_State* L) { lua_pushnumber(L, luaL_checknumber(L, 1) * (180.0 / M_PI)); return 1; }
+static int mac_lf_math_rad(lua_State* L) { lua_pushnumber(L, luaL_checknumber(L, 1) * (M_PI / 180.0)); return 1; }
+
+// Table library replacements
+static int mac_lf_table_concat(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    size_t seplen;
+    const char* sep = luaL_optlstring(L, 2, "", &seplen);
+    lua_Integer i = luaL_optinteger(L, 3, 1);
+    lua_Integer j = luaL_optinteger(L, 4, (lua_Integer)lua_rawlen(L, 1));
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    for (; i <= j; i++) {
+        lua_rawgeti(L, 1, i);
+        luaL_addvalue(&b);
+        if (i < j) luaL_addlstring(&b, sep, seplen);
+    }
+    luaL_pushresult(&b);
+    return 1;
+}
+
+// Master function to replace all broken LJLIB_ASM FFUNCs
+static void mac_replace_broken_ffuncs(lua_State* L, sys_IMain* sys) {
+    int total = 0;
+
+    // 1. Replace LJLIB_ASM globals with manual implementations
+    struct { const char* name; lua_CFunction fn; } baseReplacements[] = {
+        {"tostring", mac_lf_tostring},
+        {"tonumber", mac_lf_tonumber},
+        {"assert", mac_lf_assert},
+        {"next", mac_lf_next},
+        {"rawget", mac_lf_rawget},
+        {"rawlen", mac_lf_rawlen},
+        {"rawequal", mac_lf_rawequal},
+        {"setmetatable", mac_lf_setmetatable},
+        {"getmetatable", mac_lf_getmetatable},
+        {"collectgarbage", mac_lf_collectgarbage},
+    };
+    for (auto& r : baseReplacements) {
+        lua_pushcfunction(L, r.fn);
+        lua_setglobal(L, r.name);
+        total++;
+    }
+
+    // 2. Convert all LJLIB_CF globals (with valid C pointers) to LIGHTFUNCs
+    lua_pushglobaltable(L);
+    total += mac_convert_cfunc_in_table(L, sys, "_G", lua_gettop(L));
+    lua_pop(L, 1);
+
+    // 3. Replace LJLIB_ASM string functions
+    lua_getglobal(L, "string");
+    if (lua_istable(L, -1)) {
+        struct { const char* name; lua_CFunction fn; } strReplacements[] = {
+            {"byte", mac_lf_string_byte},
+            {"char", mac_lf_string_char},
+            {"len", mac_lf_string_len},
+            {"sub", mac_lf_string_sub},
+            {"rep", mac_lf_string_rep},
+            {"reverse", mac_lf_string_reverse},
+            {"lower", mac_lf_string_lower},
+            {"upper", mac_lf_string_upper},
+        };
+        for (auto& r : strReplacements) {
+            lua_pushcfunction(L, r.fn);
+            lua_setfield(L, -2, r.name);
+            total++;
+        }
+        // Convert remaining LJLIB_CF string functions
+        total += mac_convert_cfunc_in_table(L, sys, "string", lua_gettop(L));
+    }
+    lua_pop(L, 1);
+
+    // 4. Replace LJLIB_ASM math functions
+    lua_getglobal(L, "math");
+    if (lua_istable(L, -1)) {
+        struct { const char* name; lua_CFunction fn; } mathReplacements[] = {
+            {"abs", mac_lf_math_abs}, {"floor", mac_lf_math_floor},
+            {"ceil", mac_lf_math_ceil}, {"sqrt", mac_lf_math_sqrt},
+            {"log", mac_lf_math_log}, {"log10", mac_lf_math_log10},
+            {"exp", mac_lf_math_exp}, {"sin", mac_lf_math_sin},
+            {"cos", mac_lf_math_cos}, {"tan", mac_lf_math_tan},
+            {"asin", mac_lf_math_asin}, {"acos", mac_lf_math_acos},
+            {"atan", mac_lf_math_atan}, {"atan2", mac_lf_math_atan2},
+            {"sinh", mac_lf_math_sinh}, {"cosh", mac_lf_math_cosh},
+            {"tanh", mac_lf_math_tanh}, {"pow", mac_lf_math_pow},
+            {"fmod", mac_lf_math_fmod}, {"max", mac_lf_math_max},
+            {"min", mac_lf_math_min}, {"frexp", mac_lf_math_frexp},
+            {"ldexp", mac_lf_math_ldexp}, {"modf", mac_lf_math_modf},
+            {"deg", mac_lf_math_deg}, {"rad", mac_lf_math_rad},
+        };
+        for (auto& r : mathReplacements) {
+            lua_pushcfunction(L, r.fn);
+            lua_setfield(L, -2, r.name);
+            total++;
+        }
+        total += mac_convert_cfunc_in_table(L, sys, "math", lua_gettop(L));
+    }
+    lua_pop(L, 1);
+
+    // 5. Convert LJLIB_CF functions in remaining library tables
+    // Skip "io" — its functions use lj_lib_upvalue internally (not exposed via
+    // lua_getupvalue) to set file-handle metatables; converting to LIGHTFUNC
+    // strips those hidden upvalues, producing bare userdata from io.open.
+    const char* libs[] = {"table", "os", "debug", "coroutine", nullptr};
+    for (int i = 0; libs[i]; i++) {
+        lua_getglobal(L, libs[i]);
+        if (lua_istable(L, -1)) {
+            if (strcmp(libs[i], "table") == 0) {
+                lua_pushcfunction(L, mac_lf_table_concat);
+                lua_setfield(L, -2, "concat");
+                total++;
+            }
+            total += mac_convert_cfunc_in_table(L, sys, libs[i], lua_gettop(L));
+        }
+        lua_pop(L, 1);
+    }
+
+    // 6. Also update string metatable so s:method() calls use our replacements
+    lua_pushliteral(L, "");
+    if (lua_getmetatable(L, -1)) {
+        lua_getglobal(L, "string");
+        lua_setfield(L, -2, "__index");
+        lua_pop(L, 1); // metatable
+    }
+    lua_pop(L, 1); // empty string
+
+    sys->con->Printf("macOS arm64: replaced %d broken FFUNC builtins with LIGHTFUNCs\n", total);
+}
+
 static int s_macHelperCoRef = LUA_NOREF;
 
 void mac_sync_globals_from_helper_co(lua_State* L)
@@ -485,8 +926,7 @@ static void mac_invoke_main_init(lua_State* L, ui_main_c* ui) {
         lua_settop(L, 0);
         return;
     }
-    lua_getglobal(L, "main");
-    lua_insert(L, -2);
+    lua_pushvalue(L, -2); // push main as self argument
     ui->sys->con->Printf("macOS: calling main.Init...\n");
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         ui->sys->con->Printf("main.Init failed: %s\n", lua_tostring(L, -1));
@@ -1049,8 +1489,11 @@ void ui_main_c::ScriptInit()
 	L = solState->lua_state();
 	if ( !L ) sys->Error("Error: unable to create Lua state.");
 #if __APPLE__ && __MACH__
-	// Before openlibs / InitAPI / PoB scripts — Lua jit.off() is too late and easy to undo. (#8)
-	mac_jit_off(L);
+	// luaJIT_setmode(MODE_OFF) + FLUSH breaks interpreter on arm64 GC64
+	// (function return capture hangs after FFUNC replacements fix that).
+	// Instead, call jit.off() from Lua AFTER replacing FFUNCs, to disable
+	// new trace compilation without corrupting the interpreter state. (#8)
+	sys->con->Printf("macOS arm64: JIT off deferred to after FFUNC replacement\n");
 #endif
 	lua_atpanic(L, l_panicFunc);
 	lua_pushlightuserdata(L, this);
@@ -1072,7 +1515,25 @@ void ui_main_c::ScriptInit()
 	lua_gc(L, LUA_GCRESTART, -1);
 
 #if __APPLE__ && __MACH__
-	// Launch.lua calls jit.opt.start at top level; stub it (engine already off via luaJIT_setmode). (#8)
+	// LuaJIT arm64: LJLIB_ASM fast functions (tostring, tonumber, etc.) have
+	// broken assembly dispatch that hangs. LJLIB_CF functions (with valid C
+	// pointer from lua_tocfunction) work fine. Replace all LJLIB_ASM builtins
+	// with LIGHTFUNC equivalents. (#8)
+	mac_replace_broken_ffuncs(L, sys);
+	// Now disable JIT compilation to prevent traces from hitting remaining
+	// unreplaced FFUNCs. Use jit.off() Lua API (not C luaJIT_setmode which
+	// breaks interpreter state). (#8)
+	{
+		static char const* const kJitOff =
+			"if jit and jit.off then jit.off() end";
+		if (luaL_dostring(L, kJitOff) != LUA_OK) {
+			sys->con->Printf("Warning: jit.off() failed: %s\n", lua_tostring(L, -1));
+			lua_pop(L, 1);
+		} else {
+			sys->con->Printf("macOS arm64: JIT compilation disabled via jit.off()\n");
+		}
+	}
+	// Launch.lua calls jit.opt.start at top level; stub it so it's harmless. (#8)
 	static char const* const kMacJit =
 		"if jit then "
 		"jit.opt.start = function(...) end "
@@ -1081,10 +1542,8 @@ void ui_main_c::ScriptInit()
 		sys->con->Printf("Warning: macOS JIT stub failed: %s\n", lua_tostring(L, -1));
 		lua_pop(L, 1);
 	} else {
-		sys->con->Printf("LuaJIT JIT disabled on macOS (C API, jit.opt.start stubbed).\n");
+		sys->con->Printf("macOS: jit.opt.start stubbed (JIT engine left enabled).\n");
 	}
-	mac_jit_off(L);
-
 	// LuaJIT 2.1 arm64 interpreter crashes when Lua bytecode calls any function
 	// stored in a GC heap table (e.g. package.loadlib, package.loaders entries).
 	// Pre-register C extensions in package.preload via the C API so require()
@@ -1231,19 +1690,102 @@ void ui_main_c::ScriptInit()
 		lua_pop(L, 1);
 	}
 
-	// Common.lua binds bit.* at load; wrap ops so bytecode never CALLs C closures. (#8)
-	static char const* const kMacBitWrap =
-		"local _b = require('bit')\n"
-		"local function w(f) return function(...) local ok,r=pcall(f,...); if not ok then error(r,0) end "
-		"return r end end\n"
-		"bit = {\n"
-		"  tobit = w(_b.tobit), bnot = w(_b.bnot), bor = w(_b.bor), band = w(_b.band),\n"
-		"  bxor = w(_b.bxor), lshift = w(_b.lshift), rshift = w(_b.rshift),\n"
-		"  arshift = w(_b.arshift), rol = w(_b.rol), ror = w(_b.ror), bswap = w(_b.bswap),\n"
-		"}\n";
-	if (luaL_dostring(L, kMacBitWrap) != LUA_OK) {
-		sys->con->Printf("Warning: macOS bit wrap failed: %s\n", lua_tostring(L, -1));
-		lua_pop(L, 1);
+	// bit.* are CClosures in LuaJIT 2.1 — replace with native LIGHTFUNC implementations.
+	// CClosures hang on arm64 GC64 (broken upvalue/GC interaction in interpreter). (#8)
+	{
+		auto tobit = [](lua_State* L) -> int {
+			lua_pushnumber(L, (int32_t)luaL_checknumber(L, 1));
+			return 1;
+		};
+		auto bnot = [](lua_State* L) -> int {
+			lua_pushnumber(L, (int32_t)(~(uint32_t)(int32_t)luaL_checknumber(L, 1)));
+			return 1;
+		};
+		auto bor = [](lua_State* L) -> int {
+			uint32_t r = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			for (int i = 2, n = lua_gettop(L); i <= n; i++)
+				r |= (uint32_t)(int32_t)luaL_checknumber(L, i);
+			lua_pushnumber(L, (int32_t)r);
+			return 1;
+		};
+		auto band = [](lua_State* L) -> int {
+			uint32_t r = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			for (int i = 2, n = lua_gettop(L); i <= n; i++)
+				r &= (uint32_t)(int32_t)luaL_checknumber(L, i);
+			lua_pushnumber(L, (int32_t)r);
+			return 1;
+		};
+		auto bxor = [](lua_State* L) -> int {
+			uint32_t r = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			for (int i = 2, n = lua_gettop(L); i <= n; i++)
+				r ^= (uint32_t)(int32_t)luaL_checknumber(L, i);
+			lua_pushnumber(L, (int32_t)r);
+			return 1;
+		};
+		auto lshift = [](lua_State* L) -> int {
+			uint32_t v = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			uint32_t n = (uint32_t)luaL_checknumber(L, 2) & 31;
+			lua_pushnumber(L, (int32_t)(v << n));
+			return 1;
+		};
+		auto rshift = [](lua_State* L) -> int {
+			uint32_t v = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			uint32_t n = (uint32_t)luaL_checknumber(L, 2) & 31;
+			lua_pushnumber(L, (int32_t)(v >> n));
+			return 1;
+		};
+		auto arshift = [](lua_State* L) -> int {
+			int32_t v = (int32_t)luaL_checknumber(L, 1);
+			uint32_t n = (uint32_t)luaL_checknumber(L, 2) & 31;
+			lua_pushnumber(L, (int32_t)(v >> n));
+			return 1;
+		};
+		auto rol = [](lua_State* L) -> int {
+			uint32_t v = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			uint32_t n = (uint32_t)luaL_checknumber(L, 2) & 31;
+			lua_pushnumber(L, (int32_t)((v << n) | (v >> (32 - n))));
+			return 1;
+		};
+		auto ror = [](lua_State* L) -> int {
+			uint32_t v = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			uint32_t n = (uint32_t)luaL_checknumber(L, 2) & 31;
+			lua_pushnumber(L, (int32_t)((v >> n) | (v << (32 - n))));
+			return 1;
+		};
+		auto bswap = [](lua_State* L) -> int {
+			uint32_t v = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+			v = ((v & 0xFF000000) >> 24) | ((v & 0x00FF0000) >> 8) |
+			    ((v & 0x0000FF00) << 8)  | ((v & 0x000000FF) << 24);
+			lua_pushnumber(L, (int32_t)v);
+			return 1;
+		};
+
+		lua_createtable(L, 0, 11);
+		struct { const char* name; lua_CFunction fn; } ops[] = {
+			{"tobit", tobit}, {"bnot", bnot}, {"bor", bor}, {"band", band},
+			{"bxor", bxor}, {"lshift", lshift}, {"rshift", rshift},
+			{"arshift", arshift}, {"rol", rol}, {"ror", ror}, {"bswap", bswap},
+		};
+		for (auto& op : ops) {
+			lua_pushcfunction(L, op.fn);
+			lua_setfield(L, -2, op.name);
+		}
+		// Simplest possible LIGHTFUNC — just return 42
+		lua_pushcfunction(L, [](lua_State* L) -> int {
+			lua_pushinteger(L, 42);
+			return 1;
+		});
+		lua_setglobal(L, "__mac_bit_tobit");
+
+		lua_pushvalue(L, -1);
+		lua_setglobal(L, "bit");
+		// Also update package.loaded so require('bit') returns our version
+		lua_getglobal(L, "package");
+		lua_getfield(L, -1, "loaded");
+		lua_pushvalue(L, -3);
+		lua_setfield(L, -2, "bit");
+		lua_pop(L, 3); // pop package, loaded, bit table copy
+		sys->con->Printf("macOS: bit.* replaced with native LIGHTFUNC implementations.\n");
 	}
 	lua_pushcfunction(L, l_mac_setmetatable);
 	lua_setglobal(L, "setmetatable");
@@ -1282,8 +1824,74 @@ void ui_main_c::ScriptInit()
 
 	// Run the script
 #if __APPLE__ && __MACH__
-	// Top-level chunk captures C API returns; JIT breaks that on arm64 GC64. (#8)
-	mac_jit_off(L);
+	// Replace pairs/ipairs with LIGHTFUNC equivalents — the standard LuaJIT versions are
+	// CClosures with upvalues, and CClosure calls hang on arm64 GC64. LIGHTFUNC pairs()
+	// returns (next, t, nil). LIGHTFUNC ipairs() uses ipairs_aux from registry. (#8)
+	lua_pushcfunction(L, [](lua_State* L) -> int {
+		luaL_checktype(L, 1, LUA_TTABLE);
+		lua_getglobal(L, "next");
+		lua_pushvalue(L, 1);
+		lua_pushnil(L);
+		return 3;
+	});
+	lua_setglobal(L, "pairs");
+
+	lua_pushcfunction(L, [](lua_State* L) -> int {
+		lua_Integer i = luaL_checkinteger(L, 2) + 1;
+		lua_pushinteger(L, i);
+		lua_rawgeti(L, 1, i);
+		return lua_isnil(L, -1) ? 0 : 2;
+	});
+	lua_setfield(L, LUA_REGISTRYINDEX, "mac_ipairs_aux");
+
+	lua_pushcfunction(L, [](lua_State* L) -> int {
+		luaL_checktype(L, 1, LUA_TTABLE);
+		lua_getfield(L, LUA_REGISTRYINDEX, "mac_ipairs_aux");
+		lua_pushvalue(L, 1);
+		lua_pushinteger(L, 0);
+		return 3;
+	});
+	lua_setglobal(L, "ipairs");
+	// type() is also a CClosure in LuaJIT 2.1 — replace with LIGHTFUNC. (#8)
+	lua_pushcfunction(L, [](lua_State* L) -> int {
+		luaL_checkany(L, 1);
+		lua_pushstring(L, luaL_typename(L, 1));
+		return 1;
+	});
+	lua_setglobal(L, "type");
+	sys->con->Printf("macOS: pairs/ipairs/type replaced with LIGHTFUNCs for GC64.\n");
+	// Scan ALL globals and common library tables for remaining CClosures (#8)
+	{
+		auto checkCClosure = [](lua_State* L, ui_main_c* ui, const char* prefix, int tableIdx) {
+			lua_pushnil(L);
+			while (lua_next(L, tableIdx) != 0) {
+				if (lua_type(L, -1) == LUA_TFUNCTION && lua_iscfunction(L, -1)) {
+					const char* upname = lua_getupvalue(L, -1, 1);
+					if (upname) {
+						const char* keyName = lua_isstring(L, -3) ? lua_tostring(L, -3) : "?";
+						ui->sys->con->Printf("WARNING: %s.%s is CClosure (upvalue '%s')\n",
+							prefix, keyName, upname);
+						lua_pop(L, 1); // pop upvalue
+					}
+				}
+				lua_pop(L, 1); // pop value, keep key
+			}
+		};
+		// Scan global table
+		lua_pushglobaltable(L);
+		checkCClosure(L, this, "_G", lua_gettop(L));
+		lua_pop(L, 1);
+		// Scan common library tables
+		const char* libs[] = {"string", "table", "math", "io", "os", "debug", "coroutine", "bit", nullptr};
+		for (int i = 0; libs[i]; i++) {
+			lua_getglobal(L, libs[i]);
+			if (lua_istable(L, -1)) {
+				checkCClosure(L, this, libs[i], lua_gettop(L));
+			}
+			lua_pop(L, 1);
+		}
+	}
+	// JIT left enabled — setmode OFF breaks arm64 GC64 interpreter (#8)
 #endif
 	sys->con->Printf("Running script...\n");
 	lua_createtable(L, scriptArgc > 0 ? scriptArgc - 1 : 0, 1);
@@ -1294,7 +1902,6 @@ void ui_main_c::ScriptInit()
 	lua_setglobal(L, "arg");
 	lua_settop(L, 1);
 #if __APPLE__ && __MACH__
-	// Top-level chunk on helper thread; plain lua_pcall + traceback hides errors (#8).
 	if (!lua_isfunction(L, 1)) {
 		sys->con->Printf("macOS: launch chunk is %s, expected function\n", luaL_typename(L, 1));
 	} else {
@@ -1398,7 +2005,6 @@ void ui_main_c::Frame()
 	}
 
 	// Run script
-	//sys->con->Printf("OnFrame...\n");
 	int extraArgs = PushCallback("OnFrame");
 	if (extraArgs >= 0) {
 		PCall(extraArgs, 0);

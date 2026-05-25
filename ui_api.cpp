@@ -2075,14 +2075,36 @@ static int l_LoadModule(lua_State* L)
 		           lua_tostring(L, -1));
 	}
 	lua_replace(L, 1);
-	// lua_call crashes 2+ levels deep in a coroutine on arm64 GC64 (NULL+0x28 in lj_vm_call).
-	// lua_pcall is safe here: PLoadModule uses lua_resume (mac_pload_coroutine_call) as the
-	// outer frame, so there is no nested lua_resume inside this lua_pcall. (#8)
-	const int perr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
-	if (perr != LUA_OK) {
-		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(), lua_tostring(L, -1));
+	ui->sys->con->Printf("macOS: LoadModule running %s (%d args)\n", fileStr.c_str(), extraArgs);
+	// arm64 GC64: lua_call crashes at NULL+0x28 when nested 2+ levels inside
+	// a lua_resume coroutine. lua_pcall is safe inside coroutines and lets
+	// errors propagate to the outer lua_resume frame. (#8)
+	int runErr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
+	if (runErr != 0) {
+		const char* msg = lua_tostring(L, -1);
+		ui->sys->con->Printf("macOS: LoadModule error %s: %s\n", fileStr.c_str(),
+			msg ? msg : "unknown error");
+		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
+			msg ? msg : "unknown error");
 	}
-	return lua_gettop(L);
+	int nresults = lua_gettop(L);
+	ui->sys->con->Printf("macOS: LoadModule done %s (%d returns)\n", fileStr.c_str(), nresults);
+
+	// arm64 GC64: LIGHTFUNC return values are not captured by the interpreter.
+	// Stash results in __mac_loadmodule_result for the Lua wrapper to read. (#8)
+	if (nresults > 0) {
+		lua_createtable(L, 0, nresults + 1);
+		lua_pushinteger(L, nresults);
+		lua_setfield(L, -2, "n");
+		const char* rnames[] = { "r1", "r2", "r3" };
+		for (int i = 0; i < nresults && i < 3; i++) {
+			lua_pushvalue(L, i + 1);
+			lua_setfield(L, -2, rnames[i]);
+		}
+		lua_setglobal(L, "__mac_loadmodule_result");
+	}
+	lua_settop(L, 0);
+	return 0;
 }
 
 // Stack: [modName, optional extra args...]. Sets __mac_pload_result; clears stack. (#8)
