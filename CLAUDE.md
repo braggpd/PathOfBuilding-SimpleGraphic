@@ -28,24 +28,25 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 Check [open macOS issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan.
 
-### Status snapshot (2026-05-24, evening)
+### Status snapshot (2026-05-24, late night)
 
 | Area | State |
 |------|--------|
 | Engine `PLoadModule` / return capture | **Done** — stash + Lua wrappers (`ui_api.cpp`, `ui_main.cpp`) |
 | JIT on arm64 | **C API** `luaJIT_setmode` off + stub `jit.opt.start` (`mac_jit_off`) |
 | `loadfile` on macOS | **`__mac_loadfile_stash_c`** + `MacLoadfile` wrapper — never `local f, err = loadfile(...)` |
-| Post-Main init | **`mac_run_after_main_if_requested`** runs `LaunchAfterMain.lua` from C after `OnInit` |
-| PoB launch split | **Implemented locally** — see `docs/macos/pob-launch/` (copy to PoB `src/`) |
-| `Launch.lua` dev test | **`PLoadModule main type=table`** in ~30–90 s with split + minimal `OnInit` |
-| **#8 close criteria** | UI renders, tree loads, calcs run — **`main.Init` + frame loop still to verify** |
+| Post-Main init | **`mac_run_after_main_if_requested`** runs callbacks + PLoadModule + `_finishAfterMain` + `main.Init` from C |
+| pcall/xpcall/require | **Rewritten** — all use `lua_pcall` directly; `lua_resume` only for top-level callbacks |
+| Common.lua requires | **All pass** — `lcurl.safe`, `xml`, `base64`, `sha1`, `lua-utf8`, `setmetatable` |
+| `Launch.lua` dev test | Main.lua loads `GameVersions`, `Common`, `CalcFormat`; **hangs at `Data/Global`** (pcall depth?) |
+| **#8 close criteria** | UI renders, tree loads, calcs run — **blocked on Data/Global hang** |
 
 ### Next steps
 
-1. **Push / merge** engine changes on `macos/issue-8-*` → `macos-port` (this repo).
-2. **PoB repo:** copy `docs/macos/pob-launch/*.lua` into `src/`; PR for [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9).
-3. **Rebuild** → install → run `Launch.lua`; wait for `PLoadModule main type=table`, then **minutes** for `main.Init`.
-4. **Fix** any failure in `LaunchAfterMain.lua` / `LaunchCallbacks.lua` only — **do not bisect `Modules/Main.lua` first**.
+1. **Fix `Data/Global` hang** — try `lua_call` (unprotected) in `l_LoadModule` to reduce pcall nesting depth.
+2. **Fix global `main` visibility** — if still nil after PLoadModule, add explicit `lua_setglobal(L, "main")` from C.
+3. **`main.Init`** — once Main loads fully, verify Init runs and UI renders.
+4. **PoB repo:** copy `docs/macos/pob-launch/*.lua` into `src/`; PR for [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9).
 5. **Document** shutdown SIGBUS if it persists after successful Init.
 
 ## Key architectural decisions (do not revisit without discussion)
@@ -60,6 +61,8 @@ and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan
 | AfterMain load | **From C**, not `__mac_dofile_c` in `Launch.lua` | Same-chunk `dofile` breaks `PLoadModule` at compile time |
 | `require("xml")` | **After** Main | xml before Main breaks load on macOS |
 | Graphics API | ANGLE (Metal on macOS) | Matches Windows path |
+| pcall/xpcall/require | **`lua_pcall` directly** — not `lua_resume` | `lua_resume` hangs inside `lua_pcall`-protected frames on arm64 GC64 |
+| `mac_lightfunc_pcall` scope | **Top-level callbacks only** (`OnInit`, `OnFrame`) | Nested calls must use `lua_pcall` to avoid resume-inside-pcall |
 
 ## Build command (macOS)
 

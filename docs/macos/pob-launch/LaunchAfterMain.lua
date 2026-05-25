@@ -1,73 +1,64 @@
--- Path of Building — post-Main init (macOS arm64 #8; loaded via __mac_dofile_c after PLoadModule).
-local self = launch
-local mainPlm = launch._mainPlm
-launch._mainPlm = nil
+-- Path of Building — post-Main init (macOS arm64 #8; no top-level locals from C API / stash globals).
+ConPrintf("LaunchAfterMain start\n")
 
-self.versionNumber = "?"
-self.versionBranch = "?"
-self.versionPlatform = "?"
+launch.versionNumber = "?"
+launch.versionBranch = "?"
+launch.versionPlatform = "?"
 
-__mac_loadfile_stash_c("LaunchCallbacks.lua")
-local cbChunk = __mac_loadfile_chunk
-local cbErr = __mac_loadfile_err
-__mac_loadfile_chunk = nil
-__mac_loadfile_err = nil
-if not cbChunk then
-	ConPrintf("Failed to load LaunchCallbacks.lua: %s\n", tostring(cbErr))
-	return
-end
-cbChunk()
+ConPrintf("before PLoadModule\n")
+PLoadModule("Modules/Main")
+ConPrintf("after PLoadModule\n")
 
-local firstRunFile = io.open("first.run", "r")
-if firstRunFile then
-	firstRunFile:close()
+launch._firstRun = io.open("first.run", "r") ~= nil
+if launch._firstRun then
+	io.open("first.run", "r"):close()
 	os.remove("first.run")
 	ConClear()
 	ConPrintf("Please wait while we complete installation...\n")
-	local updatePlm = LoadModule("UpdateCheck")
-	local updateMode = updatePlm.r1
-	local errMsg = updatePlm.r2
-	if not updateMode then
-		self.updateErrMsg = errMsg
-	elseif updateMode ~= "none" then
-		self:ApplyUpdate(updateMode)
+	launch._updatePlm = LoadModule("UpdateCheck")
+	if not launch._updatePlm.r1 then
+		launch.updateErrMsg = launch._updatePlm.r2
+	elseif launch._updatePlm.r1 ~= "none" then
+		launch:ApplyUpdate(launch._updatePlm.r1)
 		return
 	end
 end
 
-local installedFile = io.open("installed.cfg", "r")
-if installedFile then
-	self.installedMode = true
-	installedFile:close()
+if io.open("installed.cfg", "r") then
+	launch.installedMode = true
+	io.open("installed.cfg", "r"):close()
 end
 
-self.main = mainPlm.main
-if mainPlm.err then
-	self:ShowErrMsg("Error loading main script: %s", mainPlm.err)
-elseif not self.main then
-	self:ShowErrMsg("Error loading main script: no object returned")
-elseif self.main.Init then
-	local initErr = PCall(self.main.Init, self.main)
-	if initErr then
-		self:ShowErrMsg("In 'Init': %s", initErr)
+launch.main = launch._mainPlm.main
+if launch._mainPlm.err then
+	launch:ShowErrMsg("Error loading main script: %s", launch._mainPlm.err)
+elseif not launch.main then
+	launch:ShowErrMsg("Error loading main script: no object returned")
+elseif launch.main.Init then
+	launch._initErr = PCall(launch.main.Init, launch.main)
+	if launch._initErr then
+		launch:ShowErrMsg("In 'Init': %s", launch._initErr)
 	end
 end
 
-if not self.devMode and not firstRunFile then
-	self:CheckForUpdate(true)
+if not launch.devMode and not launch._firstRun then
+	launch:CheckForUpdate(true)
 end
 
-local okXml, xml = pcall(require, "xml")
-if okXml then
-	local localManXML = xml.LoadXMLFile("manifest.xml") or xml.LoadXMLFile("../manifest.xml")
-	if localManXML and localManXML[1] and localManXML[1].elem == "PoBVersion" then
-		for i = 1, #localManXML[1] do
-			local node = localManXML[1][i]
-			if node and node.elem == "Version" then
-				self.versionNumber = node.attrib.number
-				self.versionBranch = node.attrib.branch
-				self.versionPlatform = node.attrib.platform
+require("xml")
+launch._xml = package.loaded["xml"]
+if launch._xml then
+	launch._manXML = launch._xml.LoadXMLFile("manifest.xml") or launch._xml.LoadXMLFile("../manifest.xml")
+	if launch._manXML and launch._manXML[1] and launch._manXML[1].elem == "PoBVersion" then
+		for i = 1, #launch._manXML[1] do
+			launch._verNode = launch._manXML[1][i]
+			if launch._verNode and launch._verNode.elem == "Version" then
+				launch.versionNumber = launch._verNode.attrib.number
+				launch.versionBranch = launch._verNode.attrib.branch
+				launch.versionPlatform = launch._verNode.attrib.platform
 			end
 		end
 	end
 end
+
+ConPrintf("LaunchAfterMain end\n")

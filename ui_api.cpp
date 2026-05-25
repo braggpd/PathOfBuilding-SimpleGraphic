@@ -8,6 +8,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cstring>
+#include <string>
 #include <zlib.h>
 #include <cmath>
 
@@ -2041,6 +2043,7 @@ static void mac_push_plm_result(lua_State* L, bool ok, int errIndex)
 	lua_createtable(L, 0, 2);
 	lua_pushnil(L);
 	lua_setfield(L, -2, "err");
+	// Do not lua_getglobal/copy main here (can panic on arm64 GC64); use global main for Init. (#8)
 	if (lua_gettop(L) >= 1) {
 		lua_pushvalue(L, 1);
 		lua_setfield(L, -2, "main");
@@ -2072,12 +2075,14 @@ static int l_LoadModule(lua_State* L)
 		           lua_tostring(L, -1));
 	}
 	lua_replace(L, 1);
-	const int pret = mac_lightfunc_pcall(L, extraArgs);
-	if (!lua_toboolean(L, 1)) {
-		const char* msg = (pret >= 2 && lua_tostring(L, 2)) ? lua_tostring(L, 2) : "unknown";
-		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(), msg);
+	ui->sys->con->Printf("macOS: LoadModule running %s\n", fileStr.c_str());
+	// Run the loaded chunk via lua_pcall (matching PLoadModule). Nested LoadModule
+	// calls work because pcall/xpcall/require all use lua_pcall (not lua_resume). (#8)
+	const int perr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
+	if (perr != LUA_OK) {
+		const char* msg = lua_tostring(L, -1);
+		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(), msg ? msg : "unknown");
 	}
-	lua_remove(L, 1);
 	const int nret = lua_gettop(L);
 	lua_createtable(L, 0, 4);
 	lua_pushinteger(L, nret > 0 ? 1 : 0);
@@ -2092,35 +2097,81 @@ static int l_LoadModule(lua_State* L)
 	return 0;
 }
 
-static int l_PLoadModule(lua_State* L)
+// Stack: [modName, optional extra args...]. Sets __mac_pload_result; clears stack. (#8)
+static bool mac_run_pload_module_impl(lua_State* L, ui_main_c* ui, int extraArgs)
 {
-	ui_main_c* ui = GetUIPtr(L);
-	int n = lua_gettop(L);
-	if (n < 1) {
-		luaL_error(L, "Usage: PLoadModule(name[, ...])");
+	if (lua_gettop(L) < 1 || !lua_isstring(L, 1)) {
+		luaL_error(L, "PLoadModule() argument 1: expected string, got %s",
+		           luaL_typename(L, lua_type(L, 1)));
 	}
-	if (!lua_isstring(L, 1)) {
-		luaL_error(L, "PLoadModule() argument 1: expected string, got %s", luaL_typename(L, 1));
-	}
-	const int extraArgs = n - 1;
 	auto filePath = mac_module_file_path(ui, lua_tostring(L, 1));
 	auto fileStr = filePath.generic_u8string();
 
+	ui->sys->con->Printf("macOS: PLoadModule loading %s\n", fileStr.c_str());
 	ui->sys->SetWorkDir(ui->scriptPath);
 	int err = luaL_loadfile(L, fileStr.c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	if (err) {
 		lua_settop(L, 1);
 		mac_push_plm_result(L, false, 1);
-		return 1;
+		lua_pushvalue(L, 1);
+		lua_setglobal(L, "__mac_pload_result");
+		lua_settop(L, 0);
+		return false;
 	}
 	lua_replace(L, 1);
-	const int pret = mac_lightfunc_pcall(L, extraArgs);
-	mac_push_plm_result(L, lua_toboolean(L, 1), pret >= 2 ? 2 : 1);
+	// Use lua_pcall instead of mac_lightfunc_pcall to avoid deep coroutine nesting
+	// that hangs on arm64 GC64 (Main.lua calls LoadModule which calls require). (#8)
+	lua_getfield(L, LUA_REGISTRYINDEX, "traceback");
+	lua_insert(L, 1);
+	const int perr = lua_pcall(L, extraArgs, LUA_MULTRET, 1);
+	lua_remove(L, 1); // drop traceback
+	if (perr != LUA_OK) {
+		lua_pushboolean(L, 0);
+		lua_insert(L, 1);
+	} else {
+		lua_pushboolean(L, 1);
+		lua_insert(L, 1);
+	}
+	const bool ok = lua_toboolean(L, 1);
+	ui->sys->con->Printf("macOS: PLoadModule %s %s\n", fileStr.c_str(), ok ? "OK" : "failed");
+	mac_push_plm_result(L, ok, 2);
 	lua_pushvalue(L, 1);
 	lua_setglobal(L, "__mac_pload_result");
 	lua_settop(L, 0);
+	return ok;
+}
+
+static int l_PLoadModule(lua_State* L)
+{
+	ui_main_c* ui = GetUIPtr(L);
+	const int n = lua_gettop(L);
+	if (n < 1) {
+		luaL_error(L, "Usage: PLoadModule(name[, ...])");
+	}
+	mac_run_pload_module_impl(L, ui, n - 1);
 	return 0;
+}
+
+// Lua entry: return result table without nested lua_pcall into l_PLoadModule. (#8)
+static int l_mac_PLoadModule(lua_State* L)
+{
+	ui_main_c* ui = GetUIPtr(L);
+	const int n = lua_gettop(L);
+	if (n < 1) {
+		luaL_error(L, "Usage: PLoadModule(name[, ...])");
+	}
+	mac_run_pload_module_impl(L, ui, n - 1);
+	lua_getglobal(L, "__mac_pload_result");
+	lua_pushnil(L);
+	lua_setglobal(L, "__mac_pload_result");
+	return 1;
+}
+
+bool mac_pload_module_pcall(lua_State* L, const char* modName)
+{
+	lua_pushstring(L, modName);
+	return mac_run_pload_module_impl(L, GetUIPtr(L), 0);
 }
 
 #endif
@@ -2181,6 +2232,118 @@ static int l_PCall(lua_State* L)
 }
 #endif
 
+#if __APPLE__ && __MACH__
+// ConPrintf runs as a LIGHTFUNC under ui_main_c::PCall → lua_pcall; never re-enter Lua here (#8).
+static void mac_append_value(std::string& out, lua_State* L, int idx) {
+	switch (lua_type(L, idx)) {
+	case LUA_TSTRING:
+		out.append(lua_tostring(L, idx));
+		break;
+	case LUA_TNUMBER: {
+		char buf[64];
+		const lua_Number n = lua_tonumber(L, idx);
+		const lua_Integer i = lua_tointeger(L, idx);
+		if (n == (lua_Number)i)
+			snprintf(buf, sizeof(buf), "%lld", (long long)i);
+		else
+			snprintf(buf, sizeof(buf), "%.14g", (double)n);
+		out.append(buf);
+		break;
+	}
+	case LUA_TBOOLEAN:
+		out.append(lua_toboolean(L, idx) ? "true" : "false");
+		break;
+	case LUA_TNIL:
+		out.append("nil");
+		break;
+	default: {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "%s: %p", lua_typename(L, lua_type(L, idx)), lua_topointer(L, idx));
+		out.append(buf);
+		break;
+	}
+	}
+}
+
+static std::string mac_string_format(lua_State* L, const char* fmt, int firstArg, int numArgs) {
+	std::string out;
+	int argi = 0;
+	for (const char* p = fmt; *p; ++p) {
+		if (*p != '%') {
+			out += *p;
+			continue;
+		}
+		++p;
+		if (*p == '%') {
+			out += '%';
+			continue;
+		}
+		if (!*p)
+			break;
+		while (*p && strchr("-+ #0", *p))
+			++p;
+		while (*p >= '0' && *p <= '9')
+			++p;
+		if (*p == '.') {
+			++p;
+			while (*p >= '0' && *p <= '9')
+				++p;
+		}
+		const char spec = *p;
+		if (argi >= numArgs) {
+			out.append("<missing>");
+			continue;
+		}
+		const int idx = firstArg + argi++;
+		char buf[256];
+		switch (spec) {
+		case 's':
+			mac_append_value(out, L, idx);
+			break;
+		case 'd':
+		case 'i':
+			snprintf(buf, sizeof(buf), "%d", (int)lua_tointeger(L, idx));
+			out.append(buf);
+			break;
+		case 'u':
+			snprintf(buf, sizeof(buf), "%u", (unsigned)lua_tointeger(L, idx));
+			out.append(buf);
+			break;
+		case 'f':
+			snprintf(buf, sizeof(buf), "%f", (double)lua_tonumber(L, idx));
+			out.append(buf);
+			break;
+		case 'g':
+			snprintf(buf, sizeof(buf), "%g", (double)lua_tonumber(L, idx));
+			out.append(buf);
+			break;
+		case 'x':
+			snprintf(buf, sizeof(buf), "%x", (unsigned)lua_tointeger(L, idx));
+			out.append(buf);
+			break;
+		case 'X':
+			snprintf(buf, sizeof(buf), "%X", (unsigned)lua_tointeger(L, idx));
+			out.append(buf);
+			break;
+		case 'c':
+			out += (char)(unsigned char)lua_tointeger(L, idx);
+			break;
+		case 'q':
+			out += '"';
+			mac_append_value(out, L, idx);
+			out += '"';
+			break;
+		default:
+			out += '%';
+			out += spec;
+			--argi;
+			break;
+		}
+	}
+	return out;
+}
+#endif
+
 static int l_ConPrintf(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
@@ -2188,15 +2351,17 @@ static int l_ConPrintf(lua_State* L)
 	ui->LAssert(L, n >= 1, "Usage: ConPrintf(fmt[, ...])");
 	ui->LAssert(L, lua_isstring(L, 1), "ConPrintf() argument 1: expected string, got %s", luaL_typename(L, 1));
 #if __APPLE__ && __MACH__
-	lua_getglobal(L, "string");
-	lua_getfield(L, -1, "format");
-	lua_remove(L, n + 1);	// drop "string" table, keep "string.format" at n+1
-	lua_insert(L, 1);		// move string.format to front
+	const char* fmt = lua_tostring(L, 1);
+	if (n == 1)
+		ui->sys->con->Printf("%s\n", fmt);
+	else
+		ui->sys->con->Printf("%s\n", mac_string_format(L, fmt, 2, n - 1).c_str());
+	return 0;
 #else
 	lua_pushvalue(L, lua_upvalueindex(1));	// string.format
 	lua_insert(L, 1);
-#endif
 	lua_call(L, n, 1);
+#endif
 	ui->LAssert(L, lua_isstring(L, 1), "ConPrintf() error: string.format returned non-string");
 	ui->sys->con->Printf("%s\n", lua_tostring(L, 1));
 	return 0;
@@ -2204,6 +2369,11 @@ static int l_ConPrintf(lua_State* L)
 
 static void printTableItter(lua_State* L, IConsole* con, int index, int level, bool recurse)
 {
+#if __APPLE__ && __MACH__
+	const int printedIdx = 2;
+#else
+	const int printedIdx = 3;
+#endif
 	lua_checkstack(L, 5);
 	lua_pushnil(L);
 	while (lua_next(L, index)) {
@@ -2213,25 +2383,31 @@ static void printTableItter(lua_State* L, IConsole* con, int index, int level, b
 			con->Printf("[\"%s^7\"] = ", lua_tostring(L, -2));
 		}
 		else {
+#if __APPLE__ && __MACH__
+			std::string keyStr;
+			mac_append_value(keyStr, L, -2);
+			con->Printf("%s = ", keyStr.c_str());
+#else
 			lua_pushvalue(L, 2);	// Push tostring function
 			lua_pushvalue(L, -3);	// Push key
 			lua_call(L, 1, 1);		// Call tostring
 			con->Printf("%s = ", lua_tostring(L, -1));
 			lua_pop(L, 1);			// Pop result of tostring
+#endif
 		}
 		// Print value
 		if (lua_type(L, -1) == LUA_TTABLE) {
 			bool expand = recurse;
 			if (expand) {
 				lua_pushvalue(L, -1);	// Push value
-				lua_gettable(L, 3);		// Index printed tables list
+				lua_gettable(L, printedIdx);
 				expand = lua_toboolean(L, -1) == 0;
 				lua_pop(L, 1);			// Pop result of indexing
 			}
 			if (expand) {
 				lua_pushvalue(L, -1);	// Push value
 				lua_pushboolean(L, 1);
-				lua_settable(L, 3);		// Add to printed tables list
+				lua_settable(L, printedIdx);
 				con->Printf("table: %08x {\n", lua_topointer(L, -1));
 				printTableItter(L, con, lua_gettop(L), level + 1, true);
 				for (int t = 0; t < level; t++) con->Print("  ");
@@ -2245,11 +2421,17 @@ static void printTableItter(lua_State* L, IConsole* con, int index, int level, b
 			con->Printf("\"%s\"\n", lua_tostring(L, -1));
 		}
 		else {
+#if __APPLE__ && __MACH__
+			std::string valStr;
+			mac_append_value(valStr, L, -1);
+			con->Printf("%s\n", valStr.c_str());
+#else
 			lua_pushvalue(L, 2);	// Push tostring function
 			lua_pushvalue(L, -2);	// Push value
 			lua_call(L, 1, 1);		// Call tostring
 			con->Printf("%s\n", lua_tostring(L, -1));
 			lua_pop(L, 1);			// Pop result of tostring
+#endif
 		}
 		lua_pop(L, 1);	// Pop value
 	}
@@ -2263,11 +2445,16 @@ static int l_ConPrintTable(lua_State* L)
 	ui->LAssert(L, lua_istable(L, 1), "ConPrintTable() argument 1: expected table, got %s", luaL_typename(L, 1));
 	bool recurse = lua_toboolean(L, 2) == 0;
 	lua_settop(L, 1);
+#if __APPLE__ && __MACH__
+	const int printedIdx = 2;
+#else
 	lua_getglobal(L, "tostring");
+	const int printedIdx = 3;
+#endif
 	lua_newtable(L);		// Printed tables list
 	lua_pushvalue(L, 1);	// Push root table
 	lua_pushboolean(L, 1);
-	lua_settable(L, 3);		// Add root table to printed tables list
+	lua_settable(L, printedIdx);
 	printTableItter(L, ui->sys->con, 1, 0, recurse);
 	return 0;
 }
@@ -2293,16 +2480,22 @@ static int l_print(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	int n = lua_gettop(L);
-	lua_getglobal(L, "tostring");
 	for (int i = 1; i <= n; i++) {
-		lua_pushvalue(L, -1);	// Push tostring function
+#if __APPLE__ && __MACH__
+		std::string s;
+		mac_append_value(s, L, i);
+		if (i > 1) ui->sys->con->Print(" ");
+		ui->sys->con->Print(s.c_str());
+#else
+		lua_getglobal(L, "tostring");
 		lua_pushvalue(L, i);
-		lua_call(L, 1, 1);		// Call tostring
+		lua_call(L, 1, 1);
 		const char* s = lua_tostring(L, -1);
 		ui->LAssert(L, s != NULL, "print() error: tostring returned non-string");
 		if (i > 1) ui->sys->con->Print(" ");
 		ui->sys->con->Print(s);
-		lua_pop(L, 1);			// Pop result of tostring
+		lua_pop(L, 1);
+#endif
 	}
 	ui->sys->con->Print("\n");
 	return 0;
@@ -2578,8 +2771,8 @@ int ui_main_c::InitAPI(lua_State* L)
 	ADDFUNC(LoadModule);
 	ADDFUNC(PLoadModule);
 #if __APPLE__ && __MACH__
-	lua_pushcfunction(L, l_PLoadModule);
-	lua_setglobal(L, "__mac_pload_c");
+	lua_pushcfunction(L, l_mac_PLoadModule);
+	lua_setglobal(L, "PLoadModule");
 #endif
 	ADDFUNC(PCall);
 #if __APPLE__ && __MACH__

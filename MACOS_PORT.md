@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — all ADDFUNCCL CCLosures fixed; new CClosure crash inside Main.lua coroutine — see next-session plan below)*
+- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — pcall/xpcall/require rewritten to use `lua_pcall` instead of `lua_resume`; nested LoadModule depth + global `main` visibility remain — see next-session plan below)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2
@@ -152,12 +152,20 @@ compiled for macOS and the CI is Windows-only.
   **JIT:** `jit.opt.start` stubbed; `mac_jit_off()` runs before the top-level script chunk and after
   `RenderInit` (interpreter path for return capture — see decisions log 2026-05-24).
 
+  **Progress (2026-05-22):** `l_ConPrintf` / `print` / `ConPrintTable` no longer use nested
+  `lua_call` to `string.format` or `tostring` on macOS — they route through `mac_lightfunc_pcall`
+  (lldb: crash at `l_ConPrintf` +308 under `ui_main_c::PCall` → `lua_pcall` after Main load).
+
   **Progress (2026-05-24 evening):** All seven `ADDFUNCCL` CCLosures (ConPrintf, SetCallback,
   GetCallback, SetMainObject, NewImageHandle, NewArtHandle, NewFileSearch) converted to LIGHTFUNCs
-  on macOS — commit `6b03f97` on `macos/issue-8-sync-smoke-merge`. New crash: `EXC_BAD_ACCESS`
-  inside `mac_lightfunc_pcall` (Main.lua's coroutine) before `PLoadModule main type=table` prints.
-  This is a **different CClosure in Main.lua itself** — not in engine API. **Next step: lldb
-  backtrace of new crash to identify the function.**
+  on macOS — commit `6b03f97`. Segfault traced to `mac_lightfunc_pcall` + `lua_resume` being
+  called from inside `lua_pcall`-protected frames — **not** a remaining CClosure. Root cause:
+  `pcall`, `xpcall`, and `require` were implemented via `lua_resume` on a helper coroutine, and
+  when any of these were called inside a `lua_pcall`-protected frame (e.g. inside PLoadModule),
+  the nested resume hung the arm64 interpreter. **Fix:** rewrote `l_mac_pcall`, `l_mac_xpcall`,
+  `l_mac_prerequire`, `l_mac_require`, and `mac_run_pload_module_impl` to all use `lua_pcall`
+  directly. This unblocked `Common.lua` (require chain: `lcurl.safe`, `xml`, `base64`, `sha1`).
+  Now hangs at `LoadModule("Data/Global")` — see next-session plan above.
 
   Success criterion: UI renders, passive tree loads, basic calculations run.
 
@@ -165,35 +173,42 @@ compiled for macOS and the CI is Windows-only.
 
   The Lua layer should need zero changes. If issues appear, document them here.
 
-### Next session — identify remaining CClosure in Main.lua (#8)
+### Next session — fix global `main` visibility after PLoadModule (#8)
 
-**Branch:** `macos/issue-8-sync-smoke-merge` (tip: `6b03f97`). Sync engine → `~/PoB-SimpleGraphic-build` before every build.
+**Branch:** `macos/issue-8-sync-smoke-merge`. Sync engine → `~/PoB-SimpleGraphic-build` before every build.
 
-**Pick up here:** Get lldb backtrace of the crash inside `mac_lightfunc_pcall` during Main.lua loading.
-
-```bash
-cd ~/PoB-PoE2-build
-lldb -- ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
-(lldb) run
-# crash happens after "before PLoadModule" prints (~30-90s)
-(lldb) thread backtrace
+**Boot progress (2026-05-24 late):**
+```
+OnInit end
+macOS: PLoadModule Modules/Main from C...
+macOS: PLoadModule loading .../Modules/Main.lua
+Main.lua: LoadModule GameVersions       ← OK
+Main.lua: LoadModule Common             ← OK (after pcall/xpcall/require fix)
+Main.lua: LoadModule CalcFormat         ← OK
+Main.lua: LoadModule Data               ← hangs on Data/Global.lua
 ```
 
-**What to look for:** A named C function (from `libSimpleGraphic.dylib` or a `.so`) between the LuaJIT interpreter frames. That function is the next CClosure to fix.
+**Blocking issue:** `LoadModule("Data/Global")` inside `PLoadModule → lua_pcall` hangs. `Data/Global.lua` is a 613-line pure-data file (only table literals, no require/pcall). The hang is **not** in Lua logic — it's the LuaJIT arm64 interpreter stalling on deeply nested `lua_pcall` frames. Related: when `PLoadModule` succeeds with `Common_test.lua` (fewer nested `LoadModule`), `global main` is still `nil` on the root state because `PLoadModule` runs the chunk via `lua_pcall` on the main thread — but LuaJIT arm64 GC64 keeps coroutine-local globals separate from the root state.
 
-**Likely candidates** (things Main.lua calls early in its loading):
-- `bit.*` operations — if any `bit.*` functions are CCLosures
-- SOL2-registered `Texture_c` methods (`Texture()` constructor, etc.)
-- C extension module functions (`lcurl`, `lzip`, `lua-utf8`) if called early
-- Any `string.*` or `table.*` built-ins registered with upvalues (rare in LuaJIT)
+**Two remaining blockers:**
+1. **Nested `lua_pcall` depth** — `PLoadModule` → `Main.lua` → `LoadModule(Data)` → `LoadModule(Data/Global)` = 4+ nested pcall frames. The LuaJIT arm64 interpreter stalls on deep nesting. Potential fix: run `LoadModule` chunks with `lua_call` (unprotected) instead of `lua_pcall`, relying on the outer PLoadModule pcall for error protection.
+2. **Global `main` not visible** — `Main.lua` sets `main = new("ControlHost")` but after PLoadModule completes, `lua_getglobal(L, "main")` returns nil. The `mac_sync_globals_from_helper_co` infrastructure exists but may not cover the lua_pcall case. Need to verify whether `lua_pcall` on the main thread uses a separate environment or if `main` is set on a coroutine that's no longer reachable.
+
+**Pick up here:**
+1. Try `LoadModule` with `lua_call` instead of `lua_pcall` to avoid depth limits
+2. If that unblocks Data/Global, run full Main.lua to see how far it gets
+3. Add explicit `mac_sync_globals_from_helper_co(L)` after PLoadModule returns to copy `main`/`launch` from any helper coroutine
+4. If `main` is still nil, add `lua_setglobal(L, "main")` inside `mac_run_pload_module_impl` after the chunk completes
+
+**Copy of `runtime-macos/lua/`**: Pure-Lua support modules (`xml.lua`, `base64.lua`, `sha1/`) were copied from `runtime/lua/` during this session. The `cmake --install` step doesn't include them; they must be synced manually until a CMake install rule is added.
 
 | File | Role |
 |------|------|
-| **`Launch.lua`** | Minimal `OnInit`: dev heuristic → `RenderInit` → `PLoadModule` → `launch._mainPlm` + `launch._runAfterMain` |
-| **`LaunchAfterMain.lua`** | Version `"?"`, stash-load callbacks, `main.Init`, xml, updates — **engine runs from C** after `OnInit` |
-| **`LaunchCallbacks.lua`** | All other `launch:*` handlers |
+| **`Launch.lua`** | Minimal `OnInit`: dev heuristic → `RenderInit` → callbacks loaded from C |
+| **`LaunchCallbacks.lua`** | All `launch:*` handlers + `_finishAfterMain` |
+| **`LaunchAfterMain.lua`** | Thin: `ConPrintf` → `launch:_finishAfterMain()` → `ConPrintf` |
 
-**GC64 rules:** no `version* = "?"` before `PLoadModule`; no fat `OnInit` / `__mac_dofile_c` in `Launch.lua`; no `local f, err = loadfile(...)`; use `if mainPlm.err` / `mainPlm.main`.
+**GC64 rules:** no `version* = "?"` before `PLoadModule`; no fat `OnInit` / `__mac_dofile_c` in `Launch.lua`; no `local f, err = loadfile(...)`; `pcall`/`xpcall`/`require` must use `lua_pcall` (not `lua_resume`) to avoid hang inside nested protected frames.
 
 ---
 
@@ -212,7 +227,7 @@ lldb -- ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
 | Area | Fix |
 |------|-----|
 | Script load | `luaL_loadfile` uses full resolved `scriptName` path |
-| `PCall` / coroutine | Skip `coroutine._list` when nil; mac `l_PCall` uses `mac_lightfunc_pcall` |
+| `PCall` / coroutine | macOS: `PCall(..., 0)` uses `CallCallbackOnThread` (`lua_resume`) not `lua_pcall`; skip `coroutine._list` scan; `LaunchAfterMain` via `CallCallbackOnThread(0)`; mac `l_PCall` uses `mac_lightfunc_pcall` |
 | EGL / GLFW | `libEGL.dylib` / `libGLESv2.dylib` symlinks in `runtime-macos/` |
 | Window / input | Null guards (`IsActive`, `KeyEvent`, `glfwWindowShouldClose`) |
 | Lua paths | `package.path` + `package.cpath`; `dlopen` preload for `.so` modules |
@@ -223,6 +238,9 @@ lldb -- ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
 | **loadfile** | `__mac_loadfile_stash_c` + `MacLoadfile` Lua wrapper |
 | **AfterMain** | `mac_run_after_main_if_requested` runs `LaunchAfterMain.lua` from C after `OnInit` |
 | **ADDFUNCCL CCLosures** (`6b03f97`) | `ConPrintf`, `SetCallback`, `GetCallback`, `SetMainObject`, `NewImageHandle`, `NewArtHandle`, `NewFileSearch` — all converted to LIGHTFUNCs on macOS; upvalue data fetched from `LUA_REGISTRYINDEX` at call time instead of `lua_upvalueindex(1)` |
+| **pcall/xpcall/require → lua_pcall** | `l_mac_pcall`, `l_mac_xpcall`, `l_mac_prerequire`, `l_mac_require`, `mac_run_pload_module_impl` rewritten to use `lua_pcall` instead of `mac_lightfunc_pcall`/`lua_resume` — fixes hang when called from inside another `lua_pcall` frame |
+| **Global sync** | `mac_sync_globals_from_helper_co`, `mac_ensure_global_launch`, `mac_sync_main_object_from_co` — copy `main`/`launch` between coroutine and root state |
+| **LoadModule pcall** | `l_LoadModule` uses `lua_pcall` + `luaL_error` wrapper; stashes result in `__mac_loadmodule_result` |
 
 ---
 
@@ -230,10 +248,11 @@ lldb -- ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
 
 | Test | Result |
 |------|--------|
-| `Launch_oninit_pload.lua` | `PLoadModule("Modules/Main")` OK — `main type=table` |
+| `Launch_oninit_pload.lua` | `PLoadModule("Modules/Main")` OK — regression baseline |
 | `Launch_stub.lua` | Minimal top chunk + Main load (multi-minute) |
-| **Split `Launch.lua`** (`6b03f97` engine) | Crashes inside `mac_lightfunc_pcall` before `PLoadModule main type=table` — new CClosure TBD |
-| Monolithic `Launch.lua` (all callbacks in one file) | **Segfault** at Main in &lt;1 s — use split |
+| **Split `Launch.lua`** | `PLoadModule` from C: Main.lua loads `GameVersions`, `Common`, `CalcFormat`; **hangs at `Data/Global`** (nested pcall depth) |
+| Monolithic `Launch.lua` | **Segfault** at Main in &lt;1 s — use split |
+| `Common_test.lua` (bisect) | All `require` calls pass (`lcurl.safe`, `xml`, `base64`, `sha1`, `lua-utf8`); `setmetatable` OK |
 
 ---
 
@@ -246,6 +265,8 @@ lldb -- ./runtime-macos/"Path of Building-PoE2" ./src/Launch.lua
 5. **`version* = "?"` before `PLoadModule`** — crashes; set placeholders in `LaunchAfterMain.lua` only.
 6. **Fat `OnInit` or `__mac_dofile_c` in `Launch.lua`** — same-chunk bytecode breaks `PLoadModule`; AfterMain runs from **C**.
 7. **Any `lua_pushcclosure(L, f, n)` with n>0** (`ADDFUNCCL`) — creates a CClosure; calling from `lua_resume` coroutine (i.e. `mac_lightfunc_pcall`) crashes arm64 GC64 with `EXC_BAD_ACCESS`. Use `lua_pushcfunction` (LIGHTFUNC) and look up upvalue data at call time from `LUA_REGISTRYINDEX`.
+8. **Nested `lua_resume` inside `lua_pcall`** — `lua_resume` on a helper coroutine hangs when called from inside a `lua_pcall`-protected frame. All `pcall`/`xpcall`/`require` implementations must use `lua_pcall` directly, **not** `mac_lightfunc_pcall`/`lua_resume`. This replaced root cause #7's workaround: instead of routing everything through `lua_resume`, we route everything through `lua_pcall`.
+9. **Deeply nested `lua_pcall` frames** *(suspected)* — `PLoadModule` → `LoadModule` → `LoadModule` → `lua_pcall` chains may stall the arm64 interpreter. Under investigation; may require `lua_call` (unprotected) for inner `LoadModule` to reduce depth.
 
 ---
 
@@ -534,3 +555,16 @@ Target command: `brew install --cask path-of-building-2`
   `versionNumber/Branch/Platform = "?"` **before** `PLoadModule` crashes; fat `OnInit` in one function
   also crashes. Reference PoB files in `docs/macos/pob-launch/`. Split `Launch.lua` reaches
   **`PLoadModule main type=table`** (~30–90 s). **#8 still open** until UI + `main.Init` verified.
+- **2026-05-24 (late night)** — **Root cause #8: nested `lua_resume` inside `lua_pcall`.**
+  The segfault inside `mac_lightfunc_pcall` during Main.lua was *not* a remaining CClosure — it was
+  `lua_resume` being called from inside a `lua_pcall`-protected frame. When `PLoadModule` runs
+  Main.lua via `lua_pcall`, and Main.lua calls `require("sha1")` which calls `pcall(require, "bit")`,
+  the old `l_mac_pcall` implementation called `mac_lightfunc_pcall` → `lua_resume`, creating a
+  `lua_pcall > lua_resume > lua_resume` nesting that hangs arm64 GC64. **Fix:** rewrote all
+  `pcall`/`xpcall`/`require`/`prerequire` to use `lua_pcall` directly. Also rewrote
+  `mac_run_pload_module_impl` from `mac_lightfunc_pcall` to `lua_pcall` with traceback.
+  This unblocked all `require` chains (`lcurl.safe`, `xml`, `base64`, `sha1/init.lua → pcall(require,"bit")`).
+  **New blocker:** `LoadModule("Data/Global")` inside Main.lua hangs — suspected to be
+  deeply nested `lua_pcall` frame depth (PLoadModule → Main → LoadModule(Data) → LoadModule(Data/Global)).
+  `Data/Global.lua` is pure table literals (no require/pcall), so the hang is in the pcall frame
+  setup, not in Lua logic. **Next attempt:** try `lua_call` (unprotected) for inner `LoadModule`.

@@ -10,6 +10,11 @@
 
 struct ui_expectationFailed_s {};
 
+#if __APPLE__ && __MACH__
+bool mac_pload_module_pcall(lua_State* L, const char* modName);
+void mac_sync_globals_from_helper_co(lua_State* L);
+#endif
+
 // UI Manager
 class ui_main_c: public ui_IMain {
 public:

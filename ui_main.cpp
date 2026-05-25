@@ -13,6 +13,36 @@
 // are broken in GC64 mode on arm64. Protected calls use lua_resume on a helper
 // coroutine — lua_pcall from inside a LIGHTFUNC corrupts interpreter return state. (#8)
 
+#if __APPLE__ && __MACH__
+// Copy launch from helper thread into uicallbacks.MainObject (SetMainObject from co is unreliable). (#8)
+static void mac_sync_main_object_from_co(lua_State* L, lua_State* co) {
+	lua_getglobal(co, "launch");
+	if (!lua_istable(co, -1)) {
+		lua_pop(co, 1);
+		return;
+	}
+	lua_getfield(L, LUA_REGISTRYINDEX, "uicallbacks");
+	lua_pushstring(L, "MainObject");
+	lua_xmove(co, L, 1);
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+}
+
+// SetMainObject from the launch coroutine may not update _G.launch; modules read the global. (#8)
+static void mac_ensure_global_launch(lua_State* L) {
+	lua_getfield(L, LUA_REGISTRYINDEX, "uicallbacks");
+	if (!lua_istable(L, -1)) {
+		lua_settop(L, 0);
+		return;
+	}
+	lua_getfield(L, -1, "MainObject");
+	if (lua_istable(L, -1)) {
+		lua_setglobal(L, "launch");
+	}
+	lua_settop(L, 0);
+}
+#endif
+
 static void mac_restore_raw_coroutine_create(lua_State* L) {
     lua_getglobal(L, "coroutine");
     lua_getfield(L, LUA_REGISTRYINDEX, "mac_co_create");
@@ -43,6 +73,32 @@ void mac_jit_off(lua_State* L) {
 	luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH);
 }
 
+static int s_macHelperCoRef = LUA_NOREF;
+
+void mac_sync_globals_from_helper_co(lua_State* L)
+{
+	if (s_macHelperCoRef == LUA_NOREF) {
+		return;
+	}
+	lua_rawgeti(L, LUA_REGISTRYINDEX, s_macHelperCoRef);
+	if (!lua_isthread(L, -1)) {
+		lua_pop(L, 1);
+		return;
+	}
+	lua_State* co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	static const char* const kSyncKeys[] = { "main", "launch", nullptr };
+	for (int i = 0; kSyncKeys[i]; i++) {
+		lua_getglobal(co, kSyncKeys[i]);
+		if (!lua_isnil(co, -1)) {
+			lua_xmove(co, L, 1);
+			lua_setglobal(L, kSyncKeys[i]);
+		} else {
+			lua_pop(co, 1);
+		}
+	}
+}
+
 // Entry: L = [func, arg1, ..., argN]. Exit: [true, ...] or [false, err].
 int mac_lightfunc_pcall(lua_State* L, int nargs) {
     mac_restore_raw_coroutine_create(L);
@@ -51,6 +107,11 @@ int mac_lightfunc_pcall(lua_State* L, int nargs) {
     const int status = lua_resume(co, nullptr, nargs);
     if (status == 0) {
         const int nres = lua_gettop(co);
+        if (s_macHelperCoRef != LUA_NOREF) {
+            luaL_unref(L, LUA_REGISTRYINDEX, s_macHelperCoRef);
+        }
+        lua_pushvalue(L, 1); // helper thread object left on root stack by lua_newthread
+        s_macHelperCoRef = luaL_ref(L, LUA_REGISTRYINDEX);
         lua_pushboolean(L, 1);
         lua_xmove(co, L, nres);
         lua_pop(L, 1); // drop thread
@@ -141,7 +202,12 @@ static int l_mac_pcall(lua_State* L) {
     if (n < 1) {
         luaL_error(L, "bad argument #1 to 'pcall' (value expected)");
     }
-    return mac_lightfunc_pcall(L, n - 1);
+    // Use lua_pcall instead of mac_lightfunc_pcall: lua_resume hangs
+    // when called from inside a lua_pcall-protected frame on arm64 GC64. (#8)
+    const int status = lua_pcall(L, n - 1, LUA_MULTRET, 0);
+    lua_pushboolean(L, status == LUA_OK);
+    lua_insert(L, 1);
+    return lua_gettop(L);
 }
 
 #if __APPLE__ && __MACH__
@@ -161,14 +227,13 @@ static int l_mac_prerequire(lua_State* L) {
     lua_settop(L, 1);
     lua_getglobal(L, "require");
     lua_pushvalue(L, 1);
-    const int pret = mac_lightfunc_pcall(L, 1);
-    if (!lua_toboolean(L, 1)) {
+    const int status = lua_pcall(L, 1, 1, 0);
+    if (status != LUA_OK) {
         lua_settop(L, 0);
         lua_pushboolean(L, 0);
         lua_pushnil(L);
         return 2;
     }
-    lua_remove(L, 1);
     lua_pushboolean(L, 1);
     lua_insert(L, 1);
     return 2;
@@ -180,41 +245,16 @@ static int l_mac_xpcall(lua_State* L) {
     if (n < 2) {
         luaL_error(L, "bad argument #2 to 'xpcall' (value expected)");
     }
+    // xpcall(f, msgh, ...) → status, ... using lua_pcall with error handler. (#8)
+    lua_pushvalue(L, 2); // error handler
+    lua_insert(L, 1);   // [msgh, f, msgh_orig, arg1, ...]
+    lua_remove(L, 3);   // [msgh, f, arg1, ...]
     const int nargs = n - 2;
-
-    lua_State* co = lua_newthread(L);
-    lua_pushvalue(L, 1);
-    for (int i = 3; i <= n; i++) {
-        lua_pushvalue(L, i);
-    }
-    lua_xmove(L, co, nargs + 1);
-
-    const int status = lua_resume(co, nullptr, nargs);
-    if (status == 0) {
-        const int nres = lua_gettop(co);
-        lua_pushboolean(L, 1);
-        lua_xmove(co, L, nres);
-        lua_settop(L, nres + 1);
-        return nres + 1;
-    }
-
-    const char* err = "(error object is not a string)";
-    if (lua_gettop(co) > 0) {
-        if (const char* s = lua_tostring(co, -1)) {
-            err = s;
-        }
-    }
-    lua_pushvalue(L, 2);
-    lua_pushstring(L, err);
-    if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
-        if (const char* s = lua_tostring(L, -1)) {
-            err = s;
-        }
-    }
-    lua_settop(L, 0);
-    lua_pushboolean(L, 0);
-    lua_pushstring(L, err);
-    return 2;
+    const int status = lua_pcall(L, nargs, LUA_MULTRET, 1);
+    lua_remove(L, 1); // remove error handler
+    lua_pushboolean(L, status == LUA_OK);
+    lua_insert(L, 1);
+    return lua_gettop(L);
 }
 
 // loadfile + lua_pcall on the main state, then package.loaded[modname] = result. (#8)
@@ -352,37 +392,148 @@ static int l_mac_dofile(lua_State* L) {
 }
 
 #if __APPLE__ && __MACH__
-// PoB sets launch._runAfterMain after PLoadModule; run LaunchAfterMain.lua from C (not Lua
-// bytecode — __mac_dofile_c in the same chunk as PLoadModule breaks arm64 GC64). (#8)
+// __mac_loadfile_stash_c from Lua bytecode crashes arm64 GC64; call from C only. (#8)
+static void mac_stash_loadfile(lua_State* L, ui_main_c* ui, char const* path) {
+    lua_getglobal(L, "__mac_loadfile_stash_c");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+    auto const filePath = (ui->scriptWorkDir / path).lexically_normal();
+    lua_pushstring(L, filePath.generic_u8string().c_str());
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        ui->sys->con->Printf("mac_stash_loadfile(%s) failed: %s\n", path, lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+}
+
+static void mac_run_stashed_chunk(lua_State* L, ui_main_c* ui, char const* label) {
+    lua_getglobal(L, "__mac_loadfile_chunk");
+    if (!lua_isfunction(L, -1)) {
+        lua_getglobal(L, "__mac_loadfile_err");
+        ui->sys->con->Printf("%s load failed: %s\n", label, lua_tostring(L, -1));
+        lua_settop(L, 0);
+        return;
+    }
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        ui->sys->con->Printf("%s failed: %s\n", label, lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    lua_pushnil(L);
+    lua_setglobal(L, "__mac_loadfile_chunk");
+    lua_pushnil(L);
+    lua_setglobal(L, "__mac_loadfile_err");
+    lua_settop(L, 0);
+}
+
+// Call main:Init via C API (Init must be fetched from global main, not launch). (#8)
+static void mac_invoke_main_init(lua_State* L, ui_main_c* ui) {
+    lua_settop(L, 0);
+    lua_getglobal(L, "main");
+    if (lua_isnil(L, -1)) {
+        ui->sys->con->Printf("main.Init: global main is nil after PLoadModule\n");
+        lua_settop(L, 0);
+        return;
+    }
+    lua_getglobal(L, "launch");
+    if (lua_istable(L, -1)) {
+        lua_pushvalue(L, -2);
+        lua_setfield(L, -2, "main");
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
+    lua_getfield(L, -1, "Init");
+    if (!lua_isfunction(L, -1)) {
+        ui->sys->con->Printf("main.Init: Init is %s\n", luaL_typename(L, -1));
+        lua_settop(L, 0);
+        return;
+    }
+    lua_getglobal(L, "main");
+    lua_insert(L, -2);
+    ui->sys->con->Printf("macOS: calling main.Init...\n");
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        ui->sys->con->Printf("main.Init failed: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    } else {
+        ui->sys->con->Printf("macOS: main.Init OK\n");
+    }
+    lua_settop(L, 0);
+}
+
+// Run LaunchAfterMain.lua from C after PLoadModule (split from OnInit on arm64 GC64). (#8)
 static void mac_run_after_main_if_requested(lua_State* L, ui_main_c* ui) {
+    mac_ensure_global_launch(L);
     lua_getglobal(L, "launch");
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
         return;
     }
-    lua_getfield(L, -1, "_runAfterMain");
-    if (!lua_toboolean(L, -1)) {
-        lua_pop(L, 2);
-        return;
-    }
-    lua_pop(L, 1);
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "_runAfterMain");
     lua_pop(L, 1);
 
-    auto const afterMain = (ui->scriptWorkDir / "LaunchAfterMain.lua").lexically_normal();
-    ui->sys->SetWorkDir(ui->scriptPath);
-    const int loadErr = luaL_loadfile(L, afterMain.generic_u8string().c_str());
-    ui->sys->SetWorkDir(ui->scriptWorkDir);
-    if (loadErr != LUA_OK) {
-        ui->sys->con->Printf("LaunchAfterMain.lua load failed: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
+    mac_stash_loadfile(L, ui, "LaunchCallbacks.lua");
+    lua_getglobal(L, "launch");
+    if (!lua_istable(L, -1)) {
+        ui->sys->con->Printf("macOS: global launch missing before LaunchCallbacks\n");
+        lua_settop(L, 0);
         return;
     }
-    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-        ui->sys->con->Printf("LaunchAfterMain.lua failed: %s\n", lua_tostring(L, -1));
+    lua_pop(L, 1);
+    mac_run_stashed_chunk(L, ui, "LaunchCallbacks.lua");
+    lua_getglobal(L, "launch");
+    lua_getfield(L, -1, "_finishAfterMain");
+    if (!lua_isfunction(L, -1)) {
+        ui->sys->con->Printf("macOS: launch._finishAfterMain missing after LaunchCallbacks\n");
+        lua_settop(L, 0);
+        return;
+    }
+    lua_pop(L, 2);
+
+    ui->sys->con->Printf("macOS: PLoadModule Modules/Main from C...\n");
+    if (!mac_pload_module_pcall(L, "Modules/Main")) {
+        const char* err = lua_tostring(L, -1);
+        ui->sys->con->Printf("PLoadModule failed: %s\n", err ? err : "(no message)");
+        lua_settop(L, 0);
+        return;
+    }
+    ui->sys->con->Printf("macOS: PLoadModule done (C path)\n");
+    lua_getglobal(L, "main");
+    ui->sys->con->Printf("macOS: global main after plm is %s\n", luaL_typename(L, -1));
+    lua_settop(L, 0);
+    if (luaL_dostring(L, "ConPrintf('C dostring: _G.main=%s main=%s\\n', type(_G.main), type(main))") != LUA_OK) {
+        ui->sys->con->Printf("macOS: dostring failed: %s\n", lua_tostring(L, -1));
+        lua_settop(L, 0);
+    }
+    mac_ensure_global_launch(L);
+    ui->sys->con->Printf("macOS: global launch synced\n");
+
+    ui->sys->con->Printf("macOS: running LaunchAfterMain (_finishAfterMain)...\n");
+    lua_getglobal(L, "launch");
+    lua_getfield(L, -1, "_finishAfterMain");
+    if (!lua_isfunction(L, -1)) {
+        ui->sys->con->Printf("macOS: launch._finishAfterMain is not a function\n");
+        lua_settop(L, 0);
+        return;
+    }
+    lua_insert(L, -2);
+    int errfunc = 0;
+    lua_getfield(L, LUA_REGISTRYINDEX, "traceback");
+    if (lua_isfunction(L, -1)) {
+        lua_insert(L, 1);
+        errfunc = 1;
+    } else {
         lua_pop(L, 1);
     }
+    if (lua_pcall(L, 1, 0, errfunc) != LUA_OK) {
+        ui->sys->con->Printf("LaunchAfterMain failed: %s\n", lua_tostring(L, -1));
+        lua_settop(L, 0);
+        return;
+    }
+    lua_settop(L, 0);
+    mac_ensure_global_launch(L);
+    ui->sys->con->Printf("macOS: calling main.Init from C...\n");
+    mac_invoke_main_init(L, ui);
+    ui->sys->con->Printf("macOS: post main.Init\n");
 }
 #endif
 
@@ -425,7 +576,7 @@ static int l_mac_require(lua_State* L) {
     lua_getfield(L, 4, modname);
     if (lua_isfunction(L, -1)) {
         lua_pushvalue(L, 1);            // pass modname as arg
-        mac_resume_call(L, 1, 1);       // loader(modname) → result
+        if (lua_pcall(L, 1, 1, 0) != LUA_OK) return lua_error(L);
         if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
         lua_pushvalue(L, -1);
         lua_setfield(L, loadedIdx, modname);   // package.loaded[modname] = result
@@ -457,20 +608,8 @@ static int l_mac_require(lua_State* L) {
             const bool sha1Tree = (modname[0] == 's' && modname[1] == 'h' && modname[2] == 'a'
                                    && modname[3] == '1'
                                    && (modname[4] == '\0' || modname[4] == '.'));
-            if (sha1Tree) {
-                lua_pushvalue(L, -1);
-                const int pret = mac_lightfunc_pcall(L, 0);
-                lua_pop(L, 1); // loader chunk
-                if (!lua_toboolean(L, -2)) {
-                    return lua_error(L);
-                }
-                if (pret >= 2) {
-                    lua_pushvalue(L, -1);
-                } else {
-                    lua_pushboolean(L, 1);
-                }
-            } else {
-                mac_resume_call(L, 0, 1);
+            {
+                if (lua_pcall(L, 0, 1, 0) != LUA_OK) return lua_error(L);
                 if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
                 lua_pushvalue(L, -1);
             }
@@ -483,6 +622,44 @@ static int l_mac_require(lua_State* L) {
         }
         tried += "\n\tno file '"; tried += tmpl; tried += "'";
         lua_pop(L, 1);  // pop load error
+    }
+
+    // 4. Search package.cpath for native C modules (.so / .dylib).
+    lua_getfield(L, 2, "cpath");
+    const char* cpathcstr = lua_tostring(L, -1);
+    std::string cpath(cpathcstr ? cpathcstr : "");
+    lua_pop(L, 1);
+
+    pos = 0;
+    while (pos <= cpath.size()) {
+        size_t semi = cpath.find(';', pos);
+        if (semi == std::string::npos) semi = cpath.size();
+        std::string tmpl = cpath.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (tmpl.empty()) continue;
+        size_t q = tmpl.find('?');
+        if (q != std::string::npos) tmpl.replace(q, 1, modpath);
+        void* lib = dlopen(tmpl.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (lib) {
+            std::string funcname = "luaopen_";
+            for (const char* p = modname; *p; p++) {
+                funcname += (*p == '.' ? '_' : *p);
+            }
+            using opener_t = int (*)(lua_State*);
+            auto opener = (opener_t)dlsym(lib, funcname.c_str());
+            if (!opener) {
+                dlclose(lib);
+                luaL_error(L, "module '%s': found '%s' but no '%s' symbol", modname, tmpl.c_str(), funcname.c_str());
+            }
+            lua_pushcfunction(L, opener);
+            lua_pushstring(L, modname);
+            if (lua_pcall(L, 1, 1, 0) != LUA_OK) return lua_error(L);
+            if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
+            lua_pushvalue(L, -1);
+            lua_setfield(L, loadedIdx, modname);
+            return mac_require_return_loaded(L, loadedIdx, modname);
+        }
+        tried += "\n\tno C file '"; tried += tmpl; tried += "'";
     }
 
     luaL_error(L, "module '%s' not found:%s", modname, tried.c_str());
@@ -633,21 +810,22 @@ int ui_main_c::PushCallback(const char* name)
 #if __APPLE__ && __MACH__
 void ui_main_c::CallCallbackOnThread(int extraArgs)
 {
+	// Same as mac_lightfunc_pcall: restore raw coroutine.create, resume [func, args] only. (#8)
+	mac_restore_raw_coroutine_create(L);
 	const int funcIdx = lua_gettop(L) - extraArgs;
 	lua_State* co = lua_newthread(L);
-	lua_pushvalue(L, 1);
-	lua_xmove(L, co, 1);
 	for (int i = extraArgs; i >= 0; --i) {
 		lua_pushvalue(L, funcIdx + i);
 	}
 	lua_xmove(L, co, extraArgs + 1);
 	lua_pop(L, 1);
 	const int err = lua_resume(co, nullptr, extraArgs);
-	if (err != 0 && !didExit) {
+	if (err != 0 && err != LUA_YIELD && !didExit) {
 		const char* msg = lua_tostring(co, -1);
+		sys->con->Printf("Lua callback error: %s\n", msg ? msg : "unknown");
 		DoError("Runtime error in", msg ? msg : "unknown");
 	}
-	lua_settop(L, 1);
+	lua_settop(L, 0);
 }
 #endif
 
@@ -658,6 +836,7 @@ void ui_main_c::PCall(int narg, int nret)
 	hasActiveCoroutine = false;
 	int err = lua_pcall(L, narg, nret, 1);
 	if (err == 0) {
+#if !(__APPLE__ && __MACH__)
 		lua_getglobal(L, "coroutine");
 		lua_getfield(L, -1, "_list");
 		// PoB defines coroutine._list in Modules/Common.lua (after Main loads). Before that, skip.
@@ -679,6 +858,7 @@ void ui_main_c::PCall(int narg, int nret)
 		} else {
 			lua_pop(L, 2);  // coroutine table + nil _list
 		}
+#endif
 	}
 	inLua = false;
 	sys->SetWorkDir();
@@ -942,19 +1122,6 @@ void ui_main_c::ScriptInit()
 	lua_pushcfunction(L, l_mac_prerequire); lua_setglobal(L, "MacPrerequire");
 	sys->con->Printf("macOS: require/loadfile/pcall/xpcall replaced for GC64.\n");
 
-	// OnInit cannot capture C API return values on arm64 GC64; re-return from a Lua function. (#8)
-	static char const* const kMacPLoadModuleWrap =
-	    "function PLoadModule(...)\n"
-	    "  __mac_pload_c(...)\n"
-	    "  local r = __mac_pload_result\n"
-	    "  __mac_pload_result = nil\n"
-	    "  return r\n"
-	    "end\n";
-	if (luaL_dostring(L, kMacPLoadModuleWrap) != LUA_OK) {
-		sys->con->Printf("Warning: macOS PLoadModule wrap failed: %s\n", lua_tostring(L, -1));
-		lua_pop(L, 1);
-	}
-
 	static char const* const kMacLoadfileWrap =
 	    "function MacLoadfile(path)\n"
 	    "  __mac_loadfile_stash_c(path)\n"
@@ -1009,7 +1176,21 @@ void ui_main_c::ScriptInit()
 	    "  wrap1('__mac_gettime_c', 'GetTime', '__mac_api_result')\n"
 	    "  wrap2('__mac_getscreensize_c', 'GetScreenSize', '__mac_api_result')\n"
 	    "  wrap1('__mac_getscreenscale_c', 'GetScreenScale', '__mac_api_result')\n"
-	    "  wrap1('__mac_loadmodule_c', 'LoadModule', '__mac_loadmodule_result')\n"
+	    "  local function wrapLoadModule(c, g, stash)\n"
+	    "    _G[c] = _G[g]\n"
+	    "    _G[g] = function(...)\n"
+	    "      _G[c](...)\n"
+	    "      local r = _G[stash]\n"
+	    "      _G[stash] = nil\n"
+	    "      if not r then return end\n"
+	    "      local n = r.n or 0\n"
+	    "      if n <= 0 then return end\n"
+	    "      if n == 1 then return r.r1 end\n"
+	    "      if n == 2 then return r.r1, r.r2 end\n"
+	    "      return r.r1, r.r2, r.r3\n"
+	    "    end\n"
+	    "  end\n"
+	    "  wrapLoadModule('__mac_loadmodule_c', 'LoadModule', '__mac_loadmodule_result')\n"
 	    "  wrapPCall('__mac_pcall_c', 'PCall', '__mac_api_result')\n"
 	    "end\n";
 	if (luaL_dostring(L, kMacReturnApiWraps) != LUA_OK) {
@@ -1056,7 +1237,8 @@ void ui_main_c::ScriptInit()
 		subScriptList[i] = NULL;
 	}
 	
-	// Load the script file
+	// Load the script file (traceback handler may still be on the stack from InitAPI)
+	lua_settop(L, 0);
 	sys->SetWorkDir(scriptWorkDir);
 	err = luaL_loadfile(L, scriptName.generic_u8string().c_str());
 	if (err) {
@@ -1071,24 +1253,59 @@ void ui_main_c::ScriptInit()
 	mac_jit_off(L);
 #endif
 	sys->con->Printf("Running script...\n");
-	for (int i = 0; i < scriptArgc; i++) {
-		lua_pushstring(L, scriptArgv[i]);
-	}
-	lua_createtable(L, scriptArgc - 1, 1);
+	lua_createtable(L, scriptArgc > 0 ? scriptArgc - 1 : 0, 1);
 	for (int i = 0; i < scriptArgc; i++) {
 		lua_pushstring(L, scriptArgv[i]);
 		lua_rawseti(L, -2, i);
 	}
 	lua_setglobal(L, "arg");
+	lua_settop(L, 1);
+#if __APPLE__ && __MACH__
+	// Top-level chunk on helper thread; plain lua_pcall + traceback hides errors (#8).
+	if (!lua_isfunction(L, 1)) {
+		sys->con->Printf("macOS: launch chunk is %s, expected function\n", luaL_typename(L, 1));
+	} else {
+		mac_restore_raw_coroutine_create(L);
+		lua_State* co = lua_newthread(L);
+		lua_pushvalue(L, 1);
+		lua_xmove(L, co, 1);
+		lua_pop(L, 1);
+		const int status = lua_resume(co, nullptr, 0);
+		if (status != 0 && status != LUA_YIELD) {
+			const char* msg = lua_tostring(co, -1);
+			sys->con->Printf("Launch.lua failed: %s\n", msg ? msg : "unknown error");
+			lua_settop(L, 0);
+		} else {
+			mac_sync_main_object_from_co(L, co);
+			lua_pop(L, 1);
+			lua_settop(L, 0);
+			sys->con->Printf("macOS: Launch.lua loaded OK\n");
+		}
+	}
+	lua_settop(L, 0);
+#else
+	for (int i = 0; i < scriptArgc; i++) {
+		lua_pushstring(L, scriptArgv[i]);
+	}
+	lua_getfield(L, LUA_REGISTRYINDEX, "traceback");
+	lua_insert(L, 1);
 	PCall(scriptArgc, 0);
+#endif
 
 	if ( !didExit && !restartFlag ) {
 		// Run initialisation callback
 		int extraArgs = PushCallback("OnInit");
 		if (extraArgs >= 0) {
-			PCall(extraArgs, 0);
 #if __APPLE__ && __MACH__
+			if (lua_pcall(L, extraArgs, 0, 0) != LUA_OK) {
+				sys->con->Printf("OnInit failed: %s\n", lua_tostring(L, -1));
+				lua_settop(L, 0);
+			} else {
+				lua_settop(L, 0);
+			}
 			mac_run_after_main_if_requested(L, this);
+#else
+			PCall(extraArgs, 0);
 #endif
 		}
 	}
