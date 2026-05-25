@@ -1,8 +1,11 @@
 # Installed by CMake install(SCRIPT) on APPLE — copies vcpkg runtime dylibs into
-# the .app bundle's Contents/Frameworks/. Paths are substituted at configure time.
+# the .app bundle's Contents/Frameworks/. @...@ tokens are substituted at configure
+# time; ${CMAKE_INSTALL_PREFIX} is resolved at install time.
 
 set(_sg_lib_dir "@MACOS_BUNDLE_LIB_DIR@")
-set(_fw_dir "@MACOS_BUNDLE_FRAMEWORKS_DEST@")
+# @MACOS_FW_DEST@ = relative bundle path (configure-time constant).
+# CMAKE_INSTALL_PREFIX = actual install root (install-time).
+set(_fw_dir "${CMAKE_INSTALL_PREFIX}/@MACOS_FW_DEST@")
 set(_built_libs
     "@MACOS_BUNDLE_SG_DYLIB@"
     "@MACOS_BUNDLE_LCURL@"

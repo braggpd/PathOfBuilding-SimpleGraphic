@@ -468,8 +468,8 @@ if (APPLE)
     set(MACOS_BUNDLE_SOCKET "${CMAKE_CURRENT_BINARY_DIR}/socket.so")
     set(MACOS_BUNDLE_LZIP "${CMAKE_CURRENT_BINARY_DIR}/lzip.so")
     set(MACOS_BUNDLE_UTF8 "${CMAKE_CURRENT_BINARY_DIR}/lua-utf8.so")
-    # Absolute path where vcpkg runtime deps are copied at install time.
-    set(MACOS_BUNDLE_FRAMEWORKS_DEST "${CMAKE_INSTALL_PREFIX}/${MACOS_FW_DEST}")
+    # MACOS_FW_DEST (the relative path) is substituted into the script at configure time;
+    # CMAKE_INSTALL_PREFIX is resolved at install time when the script runs.
     set(_macos_bundle_script "${CMAKE_CURRENT_BINARY_DIR}/macos_bundle_runtime.cmake")
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos_bundle_runtime.cmake"
@@ -480,10 +480,11 @@ if (APPLE)
 
     # Ad-hoc sign the bundle so Gatekeeper allows it (#11).
     # Users launching for the first time may need to right-click → Open.
+    # \${CMAKE_INSTALL_PREFIX} is escaped so it resolves at install time, not configure time.
     install(CODE "
         execute_process(
             COMMAND codesign --deep --force --sign -
-                \"${CMAKE_INSTALL_PREFIX}/${MACOS_APP_NAME}.app\"
+                \"\${CMAKE_INSTALL_PREFIX}/${MACOS_APP_NAME}.app\"
             RESULT_VARIABLE _codesign_result
         )
         if(NOT _codesign_result EQUAL 0)
