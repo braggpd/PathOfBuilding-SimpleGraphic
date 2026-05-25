@@ -2121,8 +2121,8 @@ static bool mac_run_pload_module_impl(lua_State* L, ui_main_c* ui, int extraArgs
 	// lua_pcall 3+ deep hangs. A fresh coroutine has its own cframe base, avoiding both.
 	// Safe here: called from C top level in mac_run_after_main_if_requested, not inside
 	// any lua_pcall frame. l_mac_pcall/require use lua_pcall (no nested lua_resume). (#8)
-	mac_lightfunc_pcall(L, extraArgs);
-	// mac_lightfunc_pcall leaves [bool, results...] — same layout expected by mac_push_plm_result.
+	mac_pload_coroutine_call(L, extraArgs);
+	// mac_pload_coroutine_call leaves [bool, results...] — same layout expected by mac_push_plm_result.
 	const bool ok = lua_toboolean(L, 1);
 	ui->sys->con->Printf("macOS: PLoadModule %s %s\n", fileStr.c_str(), ok ? "OK" : "failed");
 	mac_push_plm_result(L, ok, 2);

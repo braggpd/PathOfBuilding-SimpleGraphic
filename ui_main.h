@@ -85,6 +85,8 @@ public:
 #if __APPLE__ && __MACH__
 // Stack: [func, arg1..argN] -> [true, ...] or [false, err]. (#8)
 int mac_lightfunc_pcall(lua_State* L, int nargs);
+// Stack: [chunk, arg1..argN]. Run in coroutine; sync globals after via mac_sync_globals_from_helper_co. (#8)
+int mac_pload_coroutine_call(lua_State* L, int extraArgs);
 // luaJIT_setmode(LUAJIT_MODE_ENGINE|OFF) + flush; Lua jit.off() fallback only. (#8)
 void mac_jit_off(lua_State* L);
 #endif

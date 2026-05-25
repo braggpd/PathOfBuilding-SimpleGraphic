@@ -99,6 +99,42 @@ void mac_sync_globals_from_helper_co(lua_State* L)
 	}
 }
 
+// Entry: L = [chunk, arg1..argN]. Run in fresh coroutine; store coroutine for
+// mac_sync_globals_from_helper_co. Exit: [true, results...] or [false, errmsg]. (#8)
+// Uses copy+xmove pattern from CallCallbackOnThread: push copies in reverse, xmove
+// reverses them back to correct order on co. mac_lightfunc_pcall's plain xmove
+// moves co_thread instead of chunk from direct C call sites.
+int mac_pload_coroutine_call(lua_State* L, int extraArgs) {
+    mac_restore_raw_coroutine_create(L);
+    lua_State* co = lua_newthread(L);           // L = [chunk, args..., co_thread]
+    for (int i = extraArgs; i >= 0; --i) {      // push copies in reverse
+        lua_pushvalue(L, 1 + i);
+    }
+    lua_xmove(L, co, extraArgs + 1);            // xmove reversal → correct order on co
+    // co_thread is at extraArgs+2 on L after xmove consumed the copies
+    if (s_macHelperCoRef != LUA_NOREF) {
+        luaL_unref(L, LUA_REGISTRYINDEX, s_macHelperCoRef);
+    }
+    lua_pushvalue(L, extraArgs + 2);
+    s_macHelperCoRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_settop(L, 0);
+
+    const int status = lua_resume(co, nullptr, extraArgs);
+    if (status == 0) {
+        const int nres = lua_gettop(co);
+        lua_pushboolean(L, 1);
+        if (nres > 0) lua_xmove(co, L, nres);
+        return nres + 1;
+    }
+    lua_pushboolean(L, 0);
+    if (lua_gettop(co) > 0) {
+        lua_xmove(co, L, 1);
+    } else {
+        lua_pushliteral(L, "PLoadModule: unknown error");
+    }
+    return 2;
+}
+
 // Entry: L = [func, arg1, ..., argN]. Exit: [true, ...] or [false, err].
 int mac_lightfunc_pcall(lua_State* L, int nargs) {
     mac_restore_raw_coroutine_create(L);
