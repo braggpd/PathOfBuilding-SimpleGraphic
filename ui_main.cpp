@@ -500,10 +500,6 @@ static void mac_run_after_main_if_requested(lua_State* L, ui_main_c* ui) {
     lua_getglobal(L, "main");
     ui->sys->con->Printf("macOS: global main after plm is %s\n", luaL_typename(L, -1));
     lua_settop(L, 0);
-    if (luaL_dostring(L, "ConPrintf('C dostring: _G.main=%s main=%s\\n', type(_G.main), type(main))") != LUA_OK) {
-        ui->sys->con->Printf("macOS: dostring failed: %s\n", lua_tostring(L, -1));
-        lua_settop(L, 0);
-    }
     mac_ensure_global_launch(L);
     ui->sys->con->Printf("macOS: global launch synced\n");
 
