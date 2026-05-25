@@ -755,6 +755,12 @@ void sys_video_c::GetRelativeCursor(int& x, int& y)
 	if (!initialised) return;
 	double xpos, ypos;
 	glfwGetCursorPos(wnd, &xpos, &ypos);
+#if __APPLE__ && __MACH__
+	// GLFW on macOS returns cursor in logical points; convert to
+	// framebuffer pixels so DPI-aware renderer coordinates match.
+	xpos *= vid.dpiScale;
+	ypos *= vid.dpiScale;
+#endif
 	x = (int)floor(xpos);
 	y = (int)floor(ypos);
 }
@@ -762,7 +768,11 @@ void sys_video_c::GetRelativeCursor(int& x, int& y)
 void sys_video_c::SetRelativeCursor(int x, int y)
 {
 	if (!initialised) return;
+#if __APPLE__ && __MACH__
+	glfwSetCursorPos(wnd, (double)x / vid.dpiScale, (double)y / vid.dpiScale);
+#else
 	glfwSetCursorPos(wnd, (double)x, (double)y);
+#endif
 }
 
 bool sys_video_c::IsCursorOverWindow()

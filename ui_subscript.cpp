@@ -322,6 +322,25 @@ bool ui_subscript_c::Start()
 	// Add libraries and APIs
 	lua_gc(L, LUA_GCSTOP, 0);
 	luaL_openlibs(L);
+#if __APPLE__ && __MACH__
+	{
+		// Add runtime/lua/ to package.path so subscripts can find xml, sha2, etc.
+		auto luaDir = (ui->sys->basePath / ".." / "runtime" / "lua").lexically_normal();
+		auto scriptDir = ui->scriptWorkDir;
+		std::string extra;
+		extra += luaDir.generic_u8string() + "/?.lua;";
+		extra += luaDir.generic_u8string() + "/?/init.lua;";
+		extra += scriptDir.generic_u8string() + "/?.lua;";
+		lua_getglobal(L, "package");
+		lua_getfield(L, -1, "path");
+		const char* cur = lua_tostring(L, -1);
+		std::string newPath = extra + (cur ? cur : "");
+		lua_pop(L, 1);
+		lua_pushstring(L, newPath.c_str());
+		lua_setfield(L, -2, "path");
+		lua_pop(L, 1);
+	}
+#endif
 	lua_getglobal(L, "os");
 	lua_pushcfunction(L, l_os_exit);
 	lua_setfield(L, -2, "exit");

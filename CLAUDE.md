@@ -28,25 +28,26 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 Check [open macOS issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
 and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan.
 
-### Status snapshot (2026-05-24, late night)
+### Status snapshot (2026-05-25)
 
 | Area | State |
 |------|--------|
-| Engine `PLoadModule` / return capture | **Done** — stash + Lua wrappers (`ui_api.cpp`, `ui_main.cpp`) |
-| JIT on arm64 | **C API** `luaJIT_setmode` off + stub `jit.opt.start` (`mac_jit_off`) |
-| `loadfile` on macOS | **`__mac_loadfile_stash_c`** + `MacLoadfile` wrapper — never `local f, err = loadfile(...)` |
-| Post-Main init | **`mac_run_after_main_if_requested`** runs callbacks + PLoadModule + `_finishAfterMain` + `main.Init` from C |
-| pcall/xpcall/require | **Rewritten** — all use `lua_pcall` directly; `lua_resume` only for top-level callbacks |
-| Common.lua requires | **All pass** — `lcurl.safe`, `xml`, `base64`, `sha1`, `lua-utf8`, `setmetatable` |
-| `Launch.lua` dev test | Main.lua loads `GameVersions`, `Common`, `CalcFormat`; **hangs at `Data/Global`** (pcall depth?) |
-| **#8 close criteria** | UI renders, tree loads, calcs run — **blocked on Data/Global hang** |
+| **#8 dev launch** | **DONE** — UI renders, passive tree loads, mouse tracks, text displays |
+| Engine rendering | VAO + VBO for GL ES 3.0; text culling DPI fix; `glEnable(GL_TEXTURE_2D)` disabled |
+| DPI / Retina | Cursor scaling (`vid.dpiScale`); font culling uses `VirtualScreenHeight()` |
+| `PCall` | `lua_pcall` (not `lua_resume`) — nested resume dropped draw commands |
+| `bit.*` module | Original LuaJIT builtins kept — handle `int64_t` cdata for `sha2.lua` |
+| Subscript threads | `package.path` includes `runtime/lua/` for `require("xml")` etc. |
+| Update check | Disabled on macOS (`launch._isMacOS`); future task for `lcurl.safe` |
+| Version display | Parsed from `manifest.xml` after `main.Init` |
 
 ### Next steps
 
-1. **Fix `Data/Global` hang** — try `lua_call` (unprotected) in `l_LoadModule` to reduce pcall nesting depth.
-2. **Fix global `main` visibility** — if still nil after PLoadModule, add explicit `lua_setglobal(L, "main")` from C.
-3. **`main.Init`** — once Main loads fully, verify Init runs and UI renders.
-4. **PoB repo:** copy `docs/macos/pob-launch/*.lua` into `src/`; PR for [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9).
+1. **Commit & push** engine changes on `macos/issue-8-sync-smoke-merge`.
+2. **Close [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8)** — dev launch success criteria met.
+3. **PoB repo:** copy `docs/macos/pob-launch/*.lua` into `src/`; PR for [#9](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/9).
+4. **Phase 3** — `.app` bundle, code signing, DMG packaging.
+5. **Future:** `lcurl.safe` for update check; shutdown SIGBUS fix.
 5. **Document** shutdown SIGBUS if it persists after successful Init.
 
 ## Key architectural decisions (do not revisit without discussion)

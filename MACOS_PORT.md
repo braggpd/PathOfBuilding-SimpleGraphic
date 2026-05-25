@@ -138,7 +138,7 @@ compiled for macOS and the CI is Windows-only.
 
   Implemented in `engine/system/win/sys_macos.mm` (Phase 1.3).
 
-- [ ] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(in progress — pcall/xpcall/require rewritten to use `lua_pcall` instead of `lua_resume`; nested LoadModule depth + global `main` visibility remain — see next-session plan below)*
+- [x] **2.3** Verify dev-mode launch · [#8](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/8) *(complete — UI renders, passive tree loads, mouse tracking works, text renders correctly)*
 
   ```bash
   cd /path/to/PathOfBuilding-PoE2
@@ -173,32 +173,23 @@ compiled for macOS and the CI is Windows-only.
 
   The Lua layer should need zero changes. If issues appear, document them here.
 
-### Next session — fix global `main` visibility after PLoadModule (#8)
+### Milestone: dev-mode UI renders (2026-05-25)
 
-**Branch:** `macos/issue-8-sync-smoke-merge`. Sync engine → `~/PoB-SimpleGraphic-build` before every build.
+**Branch:** `macos/issue-8-sync-smoke-merge`. #8 success criteria met.
 
-**Boot progress (2026-05-24 late):**
-```
-OnInit end
-macOS: PLoadModule Modules/Main from C...
-macOS: PLoadModule loading .../Modules/Main.lua
-Main.lua: LoadModule GameVersions       ← OK
-Main.lua: LoadModule Common             ← OK (after pcall/xpcall/require fix)
-Main.lua: LoadModule CalcFormat         ← OK
-Main.lua: LoadModule Data               ← hangs on Data/Global.lua
-```
+**What works:**
+- Full `Launch.lua` → `PLoadModule("Modules/Main")` → `main.Init` → frame loop
+- Passive tree renders, node hover tooltips display
+- Mouse tracking correct on Retina (DPI-scaled)
+- All button/label text renders (including bottom-of-screen controls)
+- Version parsed from `manifest.xml` (displayed as "Version: 0.15.0")
+- Subscript threads can `require("xml")` etc. via `package.path` fix
+- Update check disabled on macOS (future task — needs `lcurl.safe`)
 
-**Blocking issue:** `LoadModule("Data/Global")` inside `PLoadModule → lua_pcall` hangs. `Data/Global.lua` is a 613-line pure-data file (only table literals, no require/pcall). The hang is **not** in Lua logic — it's the LuaJIT arm64 interpreter stalling on deeply nested `lua_pcall` frames. Related: when `PLoadModule` succeeds with `Common_test.lua` (fewer nested `LoadModule`), `global main` is still `nil` on the root state because `PLoadModule` runs the chunk via `lua_pcall` on the main thread — but LuaJIT arm64 GC64 keeps coroutine-local globals separate from the root state.
-
-**Two remaining blockers:**
-1. **Nested `lua_pcall` depth** — `PLoadModule` → `Main.lua` → `LoadModule(Data)` → `LoadModule(Data/Global)` = 4+ nested pcall frames. The LuaJIT arm64 interpreter stalls on deep nesting. Potential fix: run `LoadModule` chunks with `lua_call` (unprotected) instead of `lua_pcall`, relying on the outer PLoadModule pcall for error protection.
-2. **Global `main` not visible** — `Main.lua` sets `main = new("ControlHost")` but after PLoadModule completes, `lua_getglobal(L, "main")` returns nil. The `mac_sync_globals_from_helper_co` infrastructure exists but may not cover the lua_pcall case. Need to verify whether `lua_pcall` on the main thread uses a separate environment or if `main` is set on a coroutine that's no longer reachable.
-
-**Pick up here:**
-1. Try `LoadModule` with `lua_call` instead of `lua_pcall` to avoid depth limits
-2. If that unblocks Data/Global, run full Main.lua to see how far it gets
-3. Add explicit `mac_sync_globals_from_helper_co(L)` after PLoadModule returns to copy `main`/`launch` from any helper coroutine
-4. If `main` is still nil, add `lua_setglobal(L, "main")` inside `mac_run_pload_module_impl` after the chunk completes
+**Known remaining issues:**
+- Shutdown SIGBUS on exit (cosmetic — does not affect functionality)
+- Auto-update not functional on macOS (disabled; tracked for Phase 3)
+- `lcurl.safe` module not bundled (needed for update check / network features)
 
 **Copy of `runtime-macos/lua/`**: Pure-Lua support modules (`xml.lua`, `base64.lua`, `sha1/`) were copied from `runtime/lua/` during this session. The `cmake --install` step doesn't include them; they must be synced manually until a CMake install rule is added.
 
@@ -241,6 +232,15 @@ Main.lua: LoadModule Data               ← hangs on Data/Global.lua
 | **pcall/xpcall/require → lua_pcall** | `l_mac_pcall`, `l_mac_xpcall`, `l_mac_prerequire`, `l_mac_require`, `mac_run_pload_module_impl` rewritten to use `lua_pcall` instead of `mac_lightfunc_pcall`/`lua_resume` — fixes hang when called from inside another `lua_pcall` frame |
 | **Global sync** | `mac_sync_globals_from_helper_co`, `mac_ensure_global_launch`, `mac_sync_main_object_from_co` — copy `main`/`launch` between coroutine and root state |
 | **LoadModule pcall** | `l_LoadModule` uses `lua_pcall` + `luaL_error` wrapper; stashes result in `__mac_loadmodule_result` |
+| **PCall lua_pcall** | macOS `l_PCall` uses `lua_pcall` (not `mac_lightfunc_pcall`/`lua_resume`) — nested resume inside coroutine silently drops draw commands |
+| **DPI cursor scaling** | `GetRelativeCursor`: multiply by `vid.dpiScale`; `SetRelativeCursor`: divide — GLFW returns logical points, renderer uses framebuffer pixels |
+| **Text culling DPI** | `r_font.cpp` `DrawTextLine` visibility check: `vid.size[1]` → `VirtualScreenHeight()` — text in bottom half of Retina screen was culled |
+| **GL ES 3.0 VAO** | Added VAO to `AdjacentMergeStrategy` layer rendering and RTT blit pass — required by GL ES 3.0 (ANGLE/Metal) |
+| **GL_TEXTURE_2D** | Disabled `glEnable(GL_TEXTURE_2D)` on macOS — invalid enum in GL ES 3.0 |
+| **Subscript package.path** | Added `runtime/lua/` and `scriptWorkDir` to subscript Lua state `package.path` |
+| **Manifest version** | Parse `manifest.xml` from C after `main.Init` for version display |
+| **Platform flag** | `launch._isMacOS = true` set from C; used to skip update check |
+| **bit.* originals** | Disabled custom `bit.*` LIGHTFUNC replacements — originals handle `int64_t` cdata for `sha2.lua` |
 
 ---
 
@@ -249,8 +249,8 @@ Main.lua: LoadModule Data               ← hangs on Data/Global.lua
 | Test | Result |
 |------|--------|
 | `Launch_oninit_pload.lua` | `PLoadModule("Modules/Main")` OK — regression baseline |
+| **Split `Launch.lua`** | **Full UI renders** — passive tree, buttons, text, mouse tracking, tooltips |
 | `Launch_stub.lua` | Minimal top chunk + Main load (multi-minute) |
-| **Split `Launch.lua`** | `PLoadModule` from C: Main.lua loads `GameVersions`, `Common`, `CalcFormat`; **hangs at `Data/Global`** (nested pcall depth) |
 | Monolithic `Launch.lua` | **Segfault** at Main in &lt;1 s — use split |
 | `Common_test.lua` (bisect) | All `require` calls pass (`lcurl.safe`, `xml`, `base64`, `sha1`, `lua-utf8`); `setmetatable` OK |
 
@@ -568,3 +568,14 @@ Target command: `brew install --cask path-of-building-2`
   deeply nested `lua_pcall` frame depth (PLoadModule → Main → LoadModule(Data) → LoadModule(Data/Global)).
   `Data/Global.lua` is pure table literals (no require/pcall), so the hang is in the pcall frame
   setup, not in Lua logic. **Next attempt:** try `lua_call` (unprotected) for inner `LoadModule`.
+- **2026-05-25** — **#8 MILESTONE: full UI renders on macOS.** Five engine fixes in one session:
+  (1) `l_PCall` switched from `mac_lightfunc_pcall`/`lua_resume` to `lua_pcall` — nested resume
+  inside the `CallCallbackOnThread` coroutine silently dropped all draw commands from `main:OnFrame()`.
+  (2) `bit.*` custom LIGHTFUNCs disabled — originals are `LJLIB_CF` (0-upvalue, GC-safe) and handle
+  `int64_t` cdata needed by `sha2.lua` FFI branch. (3) DPI cursor scaling — `GetRelativeCursor`
+  multiplied by `vid.dpiScale` (GLFW returns logical points; renderer uses framebuffer pixels).
+  (4) `r_font.cpp` text culling used `vid.size[1]` (logical height) instead of `VirtualScreenHeight()`
+  (framebuffer height) — all text in the bottom half of the Retina screen was silently culled.
+  (5) Subscript `package.path` — added `runtime/lua/` so background threads can `require("xml")`.
+  Also: manifest.xml version parsing from C; `launch._isMacOS` platform flag; update check disabled.
+  **#8 success criteria met:** UI renders, passive tree loads, mouse tracks, text displays.

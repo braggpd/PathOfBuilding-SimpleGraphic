@@ -173,6 +173,8 @@ public:
 		GLuint	blitAttribLocPos = 0;
 		GLuint	blitAttribLocTC = 0;
 		GLuint  blitSampleLocColour = 0;
+		GLuint	blitVao = 0;
+		GLuint	blitVbo = 0;
 	};
 
 	bool apiDpiAware{};

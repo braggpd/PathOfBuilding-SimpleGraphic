@@ -442,11 +442,13 @@ struct AdjacentMergeStrategy : RenderStrategy {
 		}
 		mvpMatrixLoc_ = glGetUniformLocation(prog_, "mvp_matrix");
 		batchTextureCap_ = texLocs_.size();
+		glGenVertexArrays(1, &vao_);
 		glGenBuffers(1, &vbo_);
 	}
 
 	~AdjacentMergeStrategy() {
 		glDeleteBuffers(1, &vbo_);
+		glDeleteVertexArrays(1, &vao_);
 	}
 
 	struct BatchKey {
@@ -574,6 +576,7 @@ struct AdjacentMergeStrategy : RenderStrategy {
 
 private:
 	void Dispatch() {
+		glBindVertexArray(vao_);
 		glBindBuffer(GL_ARRAY_BUFFER, vbo_);
 		auto& batch = batch_.batch;
 		auto& textures = batch_.textures;
@@ -640,6 +643,7 @@ private:
 		batch_.textures.clear();
 
 		glUseProgram(0);
+		glBindVertexArray(0);
 
 		batchIndex += 1;
 	}
@@ -651,6 +655,7 @@ private:
 	GLint mvpMatrixLoc_{};
 
 	size_t batchTextureCap_{};
+	GLuint vao_{};
 	GLuint vbo_{};
 
 	struct TexturedBatch {
@@ -904,7 +909,9 @@ void r_renderer_c::Init(r_featureFlag_e features)
 
 	// Set default state
 	glClearColor(0.0, 0.0, 0.0, 1.0);
-	glEnable(GL_TEXTURE_2D);
+#if !(__APPLE__ && __MACH__)
+	glEnable(GL_TEXTURE_2D); // FFP — invalid in GL ES 3.0 (ANGLE)
+#endif
 	glDisable(GL_DEPTH_TEST);
 	glEnable(GL_BLEND);
 
@@ -1071,6 +1078,22 @@ void r_renderer_c::Init(r_featureFlag_e features)
 			rtt.blitAttribLocPos = glGetAttribLocation(prog, "a_position");
 			rtt.blitAttribLocTC = glGetAttribLocation(prog, "a_texcoord");
 			rtt.blitSampleLocColour = glGetUniformLocation(prog, "s_tex");
+			glGenVertexArrays(1, &rtt.blitVao);
+			glGenBuffers(1, &rtt.blitVbo);
+			float blitData[] = {
+				-1.0f, -1.0f,  0.0f, 0.0f,
+				 3.0f, -1.0f,  2.0f, 0.0f,
+				-1.0f,  3.0f,  0.0f, 2.0f,
+			};
+			glBindVertexArray(rtt.blitVao);
+			glBindBuffer(GL_ARRAY_BUFFER, rtt.blitVbo);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(blitData), blitData, GL_STATIC_DRAW);
+			glVertexAttribPointer(rtt.blitAttribLocPos, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void const*)0);
+			glVertexAttribPointer(rtt.blitAttribLocTC, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void const*)(2 * sizeof(float)));
+			glEnableVertexAttribArray(rtt.blitAttribLocPos);
+			glEnableVertexAttribArray(rtt.blitAttribLocTC);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+			glBindVertexArray(0);
 		}
 	}
 
@@ -1410,6 +1433,7 @@ void r_renderer_c::EndFrame()
 	elidedFrameHashFut.wait();
 
 	++totalFrames;
+
 	bool decideDraw = false;
 	bool elideDraw = false;
 	{
@@ -1472,28 +1496,15 @@ void r_renderer_c::EndFrame()
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-		float blitTriPos[] = {
-			-1.0f, -1.0f, //
-			3.0f, -1.0f, //
-			-1.0f, 3.0f, //
-		};
-		float blitTriUV[] = {
-			0.0f, 0.0f, //
-			2.0f, 0.0f, //
-			0.0f, 2.0f, //
-		};
-
 		glViewport(0, 0, sys->video->vid.fbSize[0], sys->video->vid.fbSize[1]);
+		glBindVertexArray(rtt.blitVao);
 		glUseProgram(rtt.blitProg);
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, std::data(blitTriPos));
-		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, std::data(blitTriUV));
-		glEnableVertexAttribArray(0);
-		glEnableVertexAttribArray(1);
 		glBindTexture(GL_TEXTURE_2D, rtt.colorTexture);
 		glUniform1i(rtt.blitSampleLocColour, 0);
 		glDrawArrays(GL_TRIANGLES, 0, 3);
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glUseProgram(0);
+		glBindVertexArray(0);
 	}
 
 	if (showHash) {

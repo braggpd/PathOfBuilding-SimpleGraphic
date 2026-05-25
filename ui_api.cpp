@@ -2182,6 +2182,8 @@ bool mac_pload_module_pcall(lua_State* L, const char* modName)
 #endif
 
 #if __APPLE__ && __MACH__
+// PCall: use lua_pcall (not mac_lightfunc_pcall) — nested lua_resume inside
+// the CallCallbackOnThread coroutine silently drops draw commands on arm64 GC64. (#8)
 static int l_PCall(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
@@ -2192,20 +2194,15 @@ static int l_PCall(lua_State* L)
 	if (!lua_isfunction(L, 1)) {
 		luaL_error(L, "PCall() argument 1: expected function, got %s", luaL_typename(L, 1));
 	}
-	const int pret = mac_lightfunc_pcall(L, n - 1);
-	if (!lua_toboolean(L, 1)) {
+	const int status = lua_pcall(L, n - 1, LUA_MULTRET, 0);
+	if (status != LUA_OK) {
 		lua_createtable(L, 0, 1);
-		if (pret >= 2) {
-			lua_pushvalue(L, 2);
-		} else {
-			lua_pushliteral(L, "unknown error");
-		}
+		lua_pushvalue(L, -2);
 		lua_rawseti(L, -2, 1);
 		lua_setglobal(L, "__mac_api_result");
 		lua_settop(L, 0);
 		return 0;
 	}
-	lua_remove(L, 1);
 	const int nret = lua_gettop(L);
 	lua_createtable(L, nret + 1, 0);
 	lua_pushnil(L);

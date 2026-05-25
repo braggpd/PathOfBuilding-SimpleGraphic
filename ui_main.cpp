@@ -947,6 +947,14 @@ static void mac_run_after_main_if_requested(lua_State* L, ui_main_c* ui) {
     }
     lua_pop(L, 1);
 
+    // Set platform flag so Lua side can skip unsupported features (e.g. update check). (#8)
+    lua_getglobal(L, "launch");
+    if (lua_istable(L, -1)) {
+        lua_pushboolean(L, 1);
+        lua_setfield(L, -2, "_isMacOS");
+    }
+    lua_pop(L, 1);
+
     mac_stash_loadfile(L, ui, "LaunchCallbacks.lua");
     lua_getglobal(L, "launch");
     if (!lua_istable(L, -1)) {
@@ -1007,6 +1015,41 @@ static void mac_run_after_main_if_requested(lua_State* L, ui_main_c* ui) {
     ui->sys->con->Printf("macOS: calling main.Init from C...\n");
     mac_invoke_main_init(L, ui);
     ui->sys->con->Printf("macOS: post main.Init\n");
+
+    // Parse manifest.xml for version info after main.Init (arm64 GC64 post-init). (#8)
+    static char const* const kManifestVersion =
+        "do\n"
+        "  require('xml')\n"
+        "  local xml = package.loaded['xml']\n"
+        "  if xml then\n"
+        "    local man = xml.LoadXMLFile('manifest.xml') or xml.LoadXMLFile('../manifest.xml')\n"
+        "    if man and man[1] and man[1].elem == 'PoBVersion' then\n"
+        "      for i = 1, #man[1] do\n"
+        "        local node = man[1][i]\n"
+        "        if node and node.elem == 'Version' then\n"
+        "          launch.versionNumber = node.attrib.number\n"
+        "          launch.versionBranch = node.attrib.branch\n"
+        "          launch.versionPlatform = node.attrib.platform\n"
+        "        end\n"
+        "      end\n"
+        "    end\n"
+        "  end\n"
+        "end\n";
+    if (luaL_dostring(L, kManifestVersion) != LUA_OK) {
+        ui->sys->con->Printf("macOS: manifest version parse failed: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    lua_getglobal(L, "launch");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "versionNumber");
+        lua_getfield(L, -2, "versionBranch");
+        ui->sys->con->Printf("macOS: version=%s branch=%s\n",
+            lua_tostring(L, -2) ? lua_tostring(L, -2) : "(nil)",
+            lua_tostring(L, -1) ? lua_tostring(L, -1) : "(nil)");
+        lua_pop(L, 3);
+    } else {
+        lua_pop(L, 1);
+    }
 }
 #endif
 
@@ -1690,9 +1733,11 @@ void ui_main_c::ScriptInit()
 		lua_pop(L, 1);
 	}
 
-	// bit.* are CClosures in LuaJIT 2.1 — replace with native LIGHTFUNC implementations.
-	// CClosures hang on arm64 GC64 (broken upvalue/GC interaction in interpreter). (#8)
+	// bit.* are LJLIB_CF functions in LuaJIT 2.1 — 0-upvalue C closures that
+	// don't have GC interaction issues. Only replace tohex (formatting helper)
+	// and keep originals for int64 cdata support needed by sha2.lua FFI branch. (#8)
 	{
+#if 0 // Disabled: originals handle int64 cdata; our replacements don't
 		auto tobit = [](lua_State* L) -> int {
 			lua_pushnumber(L, (int32_t)luaL_checknumber(L, 1));
 			return 1;
@@ -1770,22 +1815,16 @@ void ui_main_c::ScriptInit()
 			lua_pushcfunction(L, op.fn);
 			lua_setfield(L, -2, op.name);
 		}
-		// Simplest possible LIGHTFUNC — just return 42
+		lua_pop(L, 1); // pop unused table
+#endif
+		// Keep the original LuaJIT bit module — it handles int64 cdata correctly.
+		// Just ensure it's accessible as a global and in package.loaded.
 		lua_pushcfunction(L, [](lua_State* L) -> int {
 			lua_pushinteger(L, 42);
 			return 1;
 		});
 		lua_setglobal(L, "__mac_bit_tobit");
-
-		lua_pushvalue(L, -1);
-		lua_setglobal(L, "bit");
-		// Also update package.loaded so require('bit') returns our version
-		lua_getglobal(L, "package");
-		lua_getfield(L, -1, "loaded");
-		lua_pushvalue(L, -3);
-		lua_setfield(L, -2, "bit");
-		lua_pop(L, 3); // pop package, loaded, bit table copy
-		sys->con->Printf("macOS: bit.* replaced with native LIGHTFUNC implementations.\n");
+		sys->con->Printf("macOS: bit.* kept as original LuaJIT builtins (int64 cdata support).\n");
 	}
 	lua_pushcfunction(L, l_mac_setmetatable);
 	lua_setglobal(L, "setmetatable");
