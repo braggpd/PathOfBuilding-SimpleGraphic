@@ -497,6 +497,7 @@ static void mac_run_after_main_if_requested(lua_State* L, ui_main_c* ui) {
         return;
     }
     ui->sys->con->Printf("macOS: PLoadModule done (C path)\n");
+    mac_sync_globals_from_helper_co(L);  // copy main/launch from coroutine _G to root _G (#8)
     lua_getglobal(L, "main");
     ui->sys->con->Printf("macOS: global main after plm is %s\n", luaL_typename(L, -1));
     lua_settop(L, 0);
