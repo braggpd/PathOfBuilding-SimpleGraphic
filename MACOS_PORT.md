@@ -340,7 +340,7 @@ First full Main load may take **1–3+ minutes** — do not kill early.
 
 ### Tasks
 
-- [ ] **3.1** Add CPack/CMake `.app` bundle config in SimpleGraphic's `CMakeLists.txt` · [#10](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/10)
+- [x] **3.1** Add CPack/CMake `.app` bundle config in SimpleGraphic's `CMakeLists.txt` · [#10](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/10)
 
   ```cmake
   if (APPLE)
@@ -354,12 +354,13 @@ First full Main load may take **1–3+ minutes** — do not kill early.
   endif()
   ```
 
-- [ ] **3.2** Code signing strategy · [#11](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/11)
+- [x] **3.2** Code signing strategy · [#11](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/11)
 
   - Initial release: ad-hoc signing (`codesign --deep --force --sign -`)
     Users see a first-launch warning; right-click → Open bypasses it.
   - Long-term: shared Apple Developer ID ($99/yr) funded by donations.
     Required for full notarization and no Gatekeeper warnings.
+  - Implemented as a CMake `install(CODE ...)` step after the bundle is assembled.
 
 - [ ] **3.3** DMG packaging · [#12](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues/12)
 
@@ -579,3 +580,9 @@ Target command: `brew install --cask path-of-building-2`
   (5) Subscript `package.path` — added `runtime/lua/` so background threads can `require("xml")`.
   Also: manifest.xml version parsing from C; `launch._isMacOS` platform flag; update check disabled.
   **#8 success criteria met:** UI renders, passive tree loads, mouse tracks, text displays.
+- **2026-05-25** — **Phase 3.1 + 3.2: `.app` bundle + ad-hoc signing.** `MACOSX_BUNDLE TRUE` on
+  `pob-host`; `mac/Info.plist.in` added; all dylibs install to `Contents/Frameworks/`; RPATHs
+  updated (`@executable_path/../Frameworks` for binary, `@loader_path` for dylibs);
+  `cmake/macos_bundle_runtime.cmake` copies vcpkg deps to `Frameworks/`; `codesign --deep
+  --force --sign -` added as final install step. `mac/host.cpp` auto-discovers `Launch.lua`
+  by walking up from the executable (handles both `.app` layout and flat dev layout).

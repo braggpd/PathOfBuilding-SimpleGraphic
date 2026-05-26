@@ -1604,6 +1604,9 @@ void ui_main_c::ScriptInit()
 		lua_getfield(L, -1, "preload");
 		for (const auto& ext : kExts) {
 			auto soPath = (sys->basePath / ext.file).lexically_normal();
+			// .app bundle layout: .so files are in Contents/Frameworks/, not Contents/MacOS/.
+			if (!std::filesystem::exists(soPath))
+				soPath = (sys->basePath / ".." / "Frameworks" / ext.file).lexically_normal();
 			void* handle = dlopen(soPath.generic_u8string().c_str(), RTLD_NOW | RTLD_LOCAL);
 			if (handle) {
 				auto fn = reinterpret_cast<lua_CFunction>(dlsym(handle, ext.sym));
@@ -1631,8 +1634,11 @@ void ui_main_c::ScriptInit()
 
 	// sha1.common has no require(); safe before LIGHTFUNC install. (#8)
 	{
-		auto const commonLua =
+		auto commonLua =
 		    (sys->basePath / ".." / "runtime" / "lua" / "sha1" / "common.lua").lexically_normal();
+		// .app bundle layout fallback: executable is in Contents/MacOS/, so go 4 levels up.
+		if (!std::filesystem::exists(commonLua))
+			commonLua = (sys->basePath / ".." / ".." / ".." / ".." / "runtime" / "lua" / "sha1" / "common.lua").lexically_normal();
 		if (!mac_preload_lua_file(L, sys, "sha1.common", commonLua)) {
 			sys->con->Printf("Warning: macOS sha1.common preload failed.\n");
 		}

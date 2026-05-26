@@ -23,10 +23,10 @@ to `master` — that stays in sync with upstream via `git rebase upstream/master
 
 ## Current phase
 
-**Phase 2 — runtime integration** (active). **Phase 1 #1–#5 complete** (2026-05-22).
+**Phase 3 — .app bundle & distribution** (active). Phase 1 + Phase 2 complete (2026-05-25).
 
 Check [open macOS issues](https://github.com/braggpd/PathOfBuilding-SimpleGraphic/issues?q=label%3Amacos-port+is%3Aopen)
-and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan.
+and **`MACOS_PORT.md` §Phase 3** for current status.
 
 ### Status snapshot (2026-05-25)
 
