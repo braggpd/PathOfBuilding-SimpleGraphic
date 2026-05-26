@@ -2601,7 +2601,11 @@ int ui_main_c::InitAPI(lua_State* L)
 		old_path += ";lua/?.lua;lua/?/init.lua";
 #if __APPLE__ && __MACH__
 		// Dev layout: host in runtime-macos/, shared scripts in ../runtime/lua/ (see PoB #8).
+		// .app bundle layout: executable is in Contents/MacOS/; go 4 levels up to reach the
+		// directory containing the .app, then find runtime/lua/.
 		auto runtime_lua_dir = (ui->sys->basePath / ".." / "runtime" / "lua").lexically_normal();
+		if (!std::filesystem::exists(runtime_lua_dir))
+			runtime_lua_dir = (ui->sys->basePath / ".." / ".." / ".." / ".." / "runtime" / "lua").lexically_normal();
 		old_path += ";" + (runtime_lua_dir / "?.lua").generic_string();
 		old_path += ";" + (runtime_lua_dir / "?" / "init.lua").generic_string();
 #endif
