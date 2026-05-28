@@ -626,20 +626,38 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
         auto fileStr = filePath.generic_u8string();
         lua_pop(co, 1); // drop a1
         lua_pop(co, 1); // drop yield table (co stack now empty)
-        // Compile directly on co — avoids lua_xmove of LClosure between states,
-        // which corrupts the function object on arm64 GC64. (#8)
+        // Run module on root L (not co): nested LoadModule calls inside modules
+        // use lua_pcall on root L — safe at any depth. Disable yield mode so
+        // those nested calls take the direct __mac_loadmodule_c path. (#8)
+        lua_pushboolean(L, 0);
+        lua_setglobal(L, "__mac_in_pload_flag");
         ui->sys->SetWorkDir(ui->scriptPath);
-        const int loadErr = luaL_loadfile(co, fileStr.c_str());
+        const int loadErr = luaL_loadfile(L, fileStr.c_str());
         ui->sys->SetWorkDir(ui->scriptWorkDir);
         if (loadErr != LUA_OK) {
-            const char* loadErrMsg = lua_tostring(co, -1);
+            const char* loadErrMsg = lua_tostring(L, -1);
             ui->sys->con->Printf("macOS: PLoad load error: %s\n", loadErrMsg ? loadErrMsg : "?");
-            // error message is already on co's stack — set error status
+            lua_pop(L, 1);
+            if (loadErrMsg) lua_pushstring(co, loadErrMsg);
+            else lua_pushliteral(co, "PLoadModule: file load failed");
             status = LUA_ERRRUN;
             break;
         }
-        // chunk is on co's stack; resume passes it as the return value of __mac_lm_yield_c.
-        status = lua_resume(co, nullptr, 1);
+        const int callErr = lua_pcall(L, 0, 0, 0);
+        if (callErr != LUA_OK) {
+            const char* callErrMsg = lua_tostring(L, -1);
+            ui->sys->con->Printf("macOS: PLoad module error: %s\n", callErrMsg ? callErrMsg : "?");
+            lua_pop(L, 1);
+            if (callErrMsg) lua_pushstring(co, callErrMsg);
+            else lua_pushliteral(co, "PLoadModule: module execution failed");
+            status = LUA_ERRRUN;
+            break;
+        }
+        // Module populated globals on L (shared with co). Resume co with 0 values;
+        // wrapLoadModule yields with no return — modules are called for side effects. (#8)
+        lua_pushboolean(L, 1);
+        lua_setglobal(L, "__mac_in_pload_flag");
+        status = lua_resume(co, nullptr, 0);
         ui->sys->con->Printf("macOS: PLoad resume status=%d coTop=%d\n",
             status, lua_gettop(co));
     }
@@ -1825,9 +1843,8 @@ void ui_main_c::ScriptInit()
 	    "    _G[c] = _G[g]\n"
 	    "    _G[g] = function(name, ...)\n"
 	    "      if __mac_in_pload_flag then\n"
-	    "        -- yield: C handler compiles file on co, no xmove between states\n"
-	    "        local chunk = __mac_lm_yield_c({ tag = \"__mac_lm\", a1 = name })\n"
-	    "        if type(chunk) == \"function\" then return chunk(...) end\n"
+	    "        -- yield: C runs module on root L, then resumes co; no return value\n"
+	    "        __mac_lm_yield_c({ tag = \"__mac_lm\", a1 = name })\n"
 	    "        return\n"
 	    "      end\n"
 	    "      _G[c](name, ...)\n"
