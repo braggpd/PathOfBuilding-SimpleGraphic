@@ -600,57 +600,49 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
             status = LUA_ERRRUN;
             break;
         }
-        lua_getfield(co, 1, "n");
-        const int nargs = (int)lua_tointeger(co, -1);
-        lua_pop(co, 1);
+        // Load the file on root L and pass the compiled chunk to co as the return
+        // value of __mac_lm_yield_c. The Lua wrapper calls chunk(...) directly inside
+        // co, so nested LoadModule calls (e.g. Data.lua → Data/Global) also yield
+        // and are handled by this same loop — no nested l_LoadModule on root. (#8)
         lua_getfield(co, 1, "a1");
-        if (ui_main_c* ui = mac_get_ui(L)) {
-            ui->sys->con->Printf("macOS: PLoad servicing LoadModule %s\n",
-                lua_tostring(co, -1) ? lua_tostring(co, -1) : "?");
+        const char* modName = lua_isstring(co, -1) ? lua_tostring(co, -1) : nullptr;
+        if (!modName) {
+            lua_pop(co, 1); // drop nil a1
+            lua_pushliteral(co, "PLoadModule: missing module name in yield");
+            status = LUA_ERRRUN;
+            break;
         }
-        lua_pop(co, 1);
-        lua_getglobal(L, "__mac_loadmodule_c");
-        static const char* const argKeys[] = { "a1", "a2", "a3" };
-        const int callArgs = nargs > 3 ? 3 : (nargs > 0 ? nargs : 0);
-        for (int i = 0; i < callArgs; i++) {
-            lua_getfield(co, 1, argKeys[i]);
+        ui_main_c* ui = mac_get_ui(L);
+        if (!ui) {
+            lua_pop(co, 1);
+            lua_pushliteral(co, "PLoadModule: no ui context");
+            status = LUA_ERRRUN;
+            break;
         }
-        if (callArgs > 0) {
-            lua_xmove(co, L, callArgs);
+        ui->sys->con->Printf("macOS: PLoad servicing LoadModule %s\n", modName);
+        auto fileName = std::filesystem::u8path(modName);
+        if (!fileName.has_extension()) fileName.replace_extension(".lua");
+        auto filePath = (ui->scriptPath / fileName).lexically_normal();
+        auto fileStr = filePath.generic_u8string();
+        lua_pop(co, 1); // drop a1
+        lua_pop(co, 1); // drop yield table (co stack now empty)
+        ui->sys->SetWorkDir(ui->scriptPath);
+        const int loadErr = luaL_loadfile(L, fileStr.c_str());
+        ui->sys->SetWorkDir(ui->scriptWorkDir);
+        if (loadErr != LUA_OK) {
+            const char* loadErrMsg = lua_tostring(L, -1);
+            ui->sys->con->Printf("macOS: PLoad load error: %s\n", loadErrMsg ? loadErrMsg : "?");
+            if (loadErrMsg) lua_pushstring(co, loadErrMsg);
+            else lua_pushliteral(co, "LoadModule() file load failed");
+            lua_settop(L, 0);
+            status = LUA_ERRRUN;
+            break;
         }
-        s_macServicingPloadQueue = true;
-        lua_pushboolean(L, 1);
-        lua_setglobal(L, "__mac_servicing_lm_flag");
-        lua_call(L, callArgs, 0);
-        lua_pushboolean(L, 0);
-        lua_setglobal(L, "__mac_servicing_lm_flag");
-        s_macServicingPloadQueue = false;
-        int resumeArgs = 0;
-        lua_getglobal(L, "__mac_loadmodule_result");
-        if (lua_istable(L, -1)) {
-            lua_getfield(L, -1, "n");
-            const int retN = (int)lua_tointeger(L, -1);
-            lua_pop(L, 1);
-            const char* rnames[] = {"r1", "r2", "r3"};
-            for (int i = 0; i < retN && i < 3; i++) {
-                lua_getfield(L, -1, rnames[i]);
-                resumeArgs++;
-            }
-            lua_pushnil(L);
-            lua_setglobal(L, "__mac_loadmodule_result");
-        } else {
-            lua_pop(L, 1);
-        }
-        lua_pop(co, 1); // single yield table only — preserve suspended call frames
-        if (resumeArgs > 0) {
-            lua_xmove(L, co, resumeArgs);
-        }
-        lua_settop(L, 0);
-        status = lua_resume(co, nullptr, resumeArgs);
-        if (ui_main_c* ui = mac_get_ui(L)) {
-            ui->sys->con->Printf("macOS: PLoad resume status=%d coTop=%d (resumeArgs=%d)\n",
-                status, lua_gettop(co), resumeArgs);
-        }
+        // chunk on L; xmove to co so it is the return value of __mac_lm_yield_c.
+        lua_xmove(L, co, 1);
+        status = lua_resume(co, nullptr, 1);
+        ui->sys->con->Printf("macOS: PLoad resume status=%d coTop=%d\n",
+            status, lua_gettop(co));
     }
     s_macInPload = false;
     lua_pushboolean(L, 0);
@@ -1832,14 +1824,14 @@ void ui_main_c::ScriptInit()
 	    "  wrap1('__mac_getscreenscale_c', 'GetScreenScale', '__mac_api_result')\n"
 	    "  local function wrapLoadModule(c, g, stash)\n"
 	    "    _G[c] = _G[g]\n"
-	    "    _G[g] = function(...)\n"
-	    "      if __mac_in_pload_flag and not __mac_servicing_lm_flag then\n"
-	    "        local n = select(\"#\", ...)\n"
-	    "        local req = { tag = \"__mac_lm\", n = n }\n"
-	    "        for i = 1, n do req[\"a\"..i] = select(i, ...) end\n"
-	    "        return __mac_lm_yield_c(req)\n"
+	    "    _G[g] = function(name, ...)\n"
+	    "      if __mac_in_pload_flag then\n"
+	    "        -- yield: C handler loads the file and sends the chunk back\n"
+	    "        local chunk = __mac_lm_yield_c({ tag = \"__mac_lm\", a1 = name })\n"
+	    "        if type(chunk) == \"function\" then return chunk(...) end\n"
+	    "        return\n"
 	    "      end\n"
-	    "      _G[c](...)\n"
+	    "      _G[c](name, ...)\n"
 	    "      local r = _G[stash]\n"
 	    "      _G[stash] = nil\n"
 	    "      if not r then return end\n"

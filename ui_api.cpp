@@ -2321,15 +2321,12 @@ static int l_LoadModule(lua_State* L)
 	}
 	lua_replace(L, 1);
 	ui->sys->con->Printf("macOS: LoadModule running %s (%d args)\n", fileStr.c_str(), extraArgs);
-	// arm64 GC64: run serviced/nested chunks in a fresh coroutine (root lua_call can SIGSEGV on Global.lua).
-	const char* coErr = nullptr;
-	if (mac_is_servicing_pload_queue()) {
-		if (!mac_run_loaded_chunk_fresh_co(L, 1, extraArgs, &coErr)) {
-			luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
-			           coErr ? coErr : "unknown error");
-		}
-	} else {
-		lua_call(L, extraArgs, LUA_MULTRET);
+	// Non-pload path only (pload loads chunks via yield handler, calls chunk in co directly).
+	// lua_pcall for safety — coroutine's lua_resume provides the cframe base. (#8)
+	const int runErr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
+	if (runErr != LUA_OK) {
+		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
+		           lua_tostring(L, -1));
 	}
 	int nresults = lua_gettop(L);
 	ui->sys->con->Printf("macOS: LoadModule done %s (%d returns)\n", fileStr.c_str(), nresults);
