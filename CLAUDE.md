@@ -36,7 +36,7 @@ and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan
 | Engine rendering | VAO + VBO for GL ES 3.0; text culling DPI fix; `glEnable(GL_TEXTURE_2D)` disabled |
 | DPI / Retina | Cursor scaling (`vid.dpiScale`); font culling uses `VirtualScreenHeight()` |
 | `PCall` | `lua_pcall` (not `lua_resume`) — nested resume dropped draw commands |
-| `bit.*` module | Original LuaJIT builtins kept — handle `int64_t` cdata for `sha2.lua` |
+| `bit.*` module | LIGHTFUNC plain-C replacements — LJLIB_ASM originals crash on arm64 GC64; sha2 int64 path not reached (update check disabled) |
 | Subscript threads | `package.path` includes `runtime/lua/` for `require("xml")` etc. |
 | Update check | Disabled on macOS (`launch._isMacOS`); future task for `lcurl.safe` |
 | Version display | Parsed from `manifest.xml` after `main.Init` |
@@ -64,6 +64,7 @@ and **`MACOS_PORT.md` → “Next session — close #8”** for the handoff plan
 | Graphics API | ANGLE (Metal on macOS) | Matches Windows path |
 | pcall/xpcall/require | **`lua_pcall` directly** — not `lua_resume` | `lua_resume` hangs inside `lua_pcall`-protected frames on arm64 GC64 |
 | `mac_lightfunc_pcall` scope | **Top-level callbacks only** (`OnInit`, `OnFrame`) | Nested calls must use `lua_pcall` to avoid resume-inside-pcall |
+| `bit.*` LIGHTFUNC | All `bit.*` replaced with plain-C LIGHTFUNCs | `lib_bit.c` confirms LJLIB_ASM; broken arm64 GC64 dispatch; 32-bit only (sha2 int64 not used on macOS) |
 
 ## Build command (macOS)
 

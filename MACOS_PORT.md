@@ -240,7 +240,7 @@ compiled for macOS and the CI is Windows-only.
 | **Subscript package.path** | Added `runtime/lua/` and `scriptWorkDir` to subscript Lua state `package.path` |
 | **Manifest version** | Parse `manifest.xml` from C after `main.Init` for version display |
 | **Platform flag** | `launch._isMacOS = true` set from C; used to skip update check |
-| **bit.* originals** | Disabled custom `bit.*` LIGHTFUNC replacements — originals handle `int64_t` cdata for `sha2.lua` |
+| **bit.* LIGHTFUNC** | `bit.*` are LJLIB_ASM (not LJLIB_CF) — replaced with plain-C LIGHTFUNCs; LJLIB_ASM dispatch crashes on arm64 GC64 during Data/Global.lua GC finalizer. 32-bit only; sha2 int64 path not reached (update check disabled). |
 
 ---
 
@@ -571,8 +571,9 @@ Target command: `brew install --cask path-of-building-2`
 - **2026-05-25** — **#8 MILESTONE: full UI renders on macOS.** Five engine fixes in one session:
   (1) `l_PCall` switched from `mac_lightfunc_pcall`/`lua_resume` to `lua_pcall` — nested resume
   inside the `CallCallbackOnThread` coroutine silently dropped all draw commands from `main:OnFrame()`.
-  (2) `bit.*` custom LIGHTFUNCs disabled — originals are `LJLIB_CF` (0-upvalue, GC-safe) and handle
-  `int64_t` cdata needed by `sha2.lua` FFI branch. (3) DPI cursor scaling — `GetRelativeCursor`
+  (2) `bit.*` originals kept at time of milestone (wrongly believed LJLIB_CF). **2026-05-28
+  correction:** `lib_bit.c` confirms `bit.*` are LJLIB_ASM; re-enabled LIGHTFUNC replacements
+  to fix SIGSEGV in Data/Global.lua loading (GC finalizer calls bit.* via broken ASM dispatch). (3) DPI cursor scaling — `GetRelativeCursor`
   multiplied by `vid.dpiScale` (GLFW returns logical points; renderer uses framebuffer pixels).
   (4) `r_font.cpp` text culling used `vid.size[1]` (logical height) instead of `VirtualScreenHeight()`
   (framebuffer height) — all text in the bottom half of the Retina screen was silently culled.
