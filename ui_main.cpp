@@ -517,15 +517,6 @@ static void mac_replace_broken_ffuncs(lua_State* L, sys_IMain* sys) {
 
 static int s_macHelperCoRef = LUA_NOREF;
 static bool s_macInPload = false;
-static int s_macProgressLine = 0; // last reported line for progress hook
-
-static void mac_module_progress_hook(lua_State*, lua_Debug* ar) {
-    if (ar->currentline > 0 && ar->currentline >= s_macProgressLine + 100) {
-        s_macProgressLine = ar->currentline;
-        fprintf(stderr, "macOS: module progress line %d\n", ar->currentline);
-        fflush(stderr);
-    }
-}
 static bool s_macServicingPloadQueue = false;
 bool mac_is_in_pload() { return s_macInPload; }
 void mac_set_in_pload(bool in_pload) { s_macInPload = in_pload; }
@@ -652,19 +643,7 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
             status = LUA_ERRRUN;
             break;
         }
-        const bool isGlobalLua = fileStr.find("Global.lua") != std::string::npos;
-        if (isGlobalLua) {
-            s_macProgressLine = 0;
-            lua_sethook(L, mac_module_progress_hook, LUA_MASKLINE, 0);
-            fprintf(stderr, "macOS: progress hook installed for %s\n", fileStr.c_str());
-            fflush(stderr);
-        }
         const int callErr = lua_pcall(L, 0, 0, 0);
-        if (isGlobalLua) {
-            lua_sethook(L, nullptr, 0, 0);
-            fprintf(stderr, "macOS: progress hook removed (last line=%d)\n", s_macProgressLine);
-            fflush(stderr);
-        }
         if (callErr != LUA_OK) {
             const char* callErrMsg = lua_tostring(L, -1);
             ui->sys->con->Printf("macOS: PLoad module error: %s\n", callErrMsg ? callErrMsg : "?");
@@ -1896,11 +1875,13 @@ void ui_main_c::ScriptInit()
 	                 lua_iscfunction(L, -1) ? 1 : 0);
 	lua_pop(L, 1);
 
-	// bit.* are LJLIB_CF functions in LuaJIT 2.1 — 0-upvalue C closures that
-	// don't have GC interaction issues. Keep originals for int64 cdata support
-	// needed by sha2.lua FFI branch. (#8)
+	// bit.* in LuaJIT 2.1 are LJLIB_ASM (lib_bit.c confirms this) — assembly-dispatch
+	// fastfunctions with a broken dispatch path on arm64 GC64. They SIGSEGV during
+	// Data/Global.lua loading when the GC runs a finalizer that calls bit.* with a
+	// cdata argument. Replace all with plain C (LIGHTFUNC) implementations.
+	// 32-bit semantics only; sha2.lua int64 cdata branch is not exercised on macOS
+	// because the update check is disabled (launch._isMacOS). (#8)
 	{
-#if 0 // Disabled: originals handle int64 cdata; our replacements don't
 		auto tobit = [](lua_State* L) -> int {
 			lua_pushnumber(L, (int32_t)luaL_checknumber(L, 1));
 			return 1;
@@ -1987,7 +1968,6 @@ void ui_main_c::ScriptInit()
 		lua_pop(L, 2); // loaded, package
 		lua_pop(L, 1); // bit table
 		sys->con->Printf("macOS: bit.* replaced with LIGHTFUNC (32-bit, arm64 GC64 safe).\n");
-#endif
 	}
 	lua_pushcfunction(L, l_mac_setmetatable);
 	lua_setglobal(L, "setmetatable");
