@@ -2321,9 +2321,27 @@ static int l_LoadModule(lua_State* L)
 	}
 	lua_replace(L, 1);
 	ui->sys->con->Printf("macOS: LoadModule running %s (%d args)\n", fileStr.c_str(), extraArgs);
-	// Non-pload path only (pload loads chunks via yield handler, calls chunk in co directly).
-	// lua_pcall for safety — coroutine's lua_resume provides the cframe base. (#8)
+	// Install line hook for large data files to report crash location.
+	static int s_lmProgressLine = 0;
+	const bool installHook = fileStr.find("Global.lua") != std::string::npos;
+	if (installHook) {
+		s_lmProgressLine = 0;
+		lua_sethook(L, [](lua_State*, lua_Debug* ar) {
+			if (ar->currentline > 0 && ar->currentline >= s_lmProgressLine + 100) {
+				s_lmProgressLine = ar->currentline;
+				fprintf(stderr, "macOS: LoadModule progress line %d\n", ar->currentline);
+				fflush(stderr);
+			}
+		}, LUA_MASKLINE, 0);
+		fprintf(stderr, "macOS: progress hook installed for %s\n", fileStr.c_str());
+		fflush(stderr);
+	}
 	const int runErr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
+	if (installHook) {
+		lua_sethook(L, nullptr, 0, 0);
+		fprintf(stderr, "macOS: progress hook done (last line=%d callErr=%d)\n", s_lmProgressLine, runErr);
+		fflush(stderr);
+	}
 	if (runErr != LUA_OK) {
 		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
 		           lua_tostring(L, -1));
