@@ -1824,14 +1824,8 @@ void ui_main_c::ScriptInit()
 	    "  wrap1('__mac_getscreenscale_c', 'GetScreenScale', '__mac_api_result')\n"
 	    "  local function wrapLoadModule(c, g, stash)\n"
 	    "    _G[c] = _G[g]\n"
-	    "    _G[g] = function(name, ...)\n"
-	    "      if __mac_in_pload_flag then\n"
-	    "        -- yield: C handler loads the file and sends the chunk back\n"
-	    "        local chunk = __mac_lm_yield_c({ tag = \"__mac_lm\", a1 = name })\n"
-	    "        if type(chunk) == \"function\" then return chunk(...) end\n"
-	    "        return\n"
-	    "      end\n"
-	    "      _G[c](name, ...)\n"
+	    "    _G[g] = function(...)\n"
+	    "      _G[c](...)\n"
 	    "      local r = _G[stash]\n"
 	    "      _G[stash] = nil\n"
 	    "      if not r then return end\n"
@@ -1859,10 +1853,11 @@ void ui_main_c::ScriptInit()
 	                 lua_iscfunction(L, -1) ? 1 : 0);
 	lua_pop(L, 1);
 
-	// bit.* in LuaJIT 2.1 are LJLIB_ASM — broken assembly dispatch on arm64 GC64.
-	// Replace all with LIGHTFUNC (plain C) implementations. 32-bit semantics only;
-	// sha2.lua int64 cdata branch is not used in PoB. (#8)
+	// bit.* are LJLIB_CF functions in LuaJIT 2.1 — 0-upvalue C closures that
+	// don't have GC interaction issues. Keep originals for int64 cdata support
+	// needed by sha2.lua FFI branch. (#8)
 	{
+#if 0 // Disabled: originals handle int64 cdata; our replacements don't
 		auto tobit = [](lua_State* L) -> int {
 			lua_pushnumber(L, (int32_t)luaL_checknumber(L, 1));
 			return 1;
@@ -1949,6 +1944,7 @@ void ui_main_c::ScriptInit()
 		lua_pop(L, 2); // loaded, package
 		lua_pop(L, 1); // bit table
 		sys->con->Printf("macOS: bit.* replaced with LIGHTFUNC (32-bit, arm64 GC64 safe).\n");
+#endif
 	}
 	lua_pushcfunction(L, l_mac_setmetatable);
 	lua_setglobal(L, "setmetatable");
