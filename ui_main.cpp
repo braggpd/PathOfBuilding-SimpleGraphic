@@ -517,6 +517,15 @@ static void mac_replace_broken_ffuncs(lua_State* L, sys_IMain* sys) {
 
 static int s_macHelperCoRef = LUA_NOREF;
 static bool s_macInPload = false;
+static int s_macProgressLine = 0; // last reported line for progress hook
+
+static void mac_module_progress_hook(lua_State*, lua_Debug* ar) {
+    if (ar->currentline > 0 && ar->currentline >= s_macProgressLine + 100) {
+        s_macProgressLine = ar->currentline;
+        fprintf(stderr, "macOS: module progress line %d\n", ar->currentline);
+        fflush(stderr);
+    }
+}
 static bool s_macServicingPloadQueue = false;
 bool mac_is_in_pload() { return s_macInPload; }
 void mac_set_in_pload(bool in_pload) { s_macInPload = in_pload; }
@@ -643,7 +652,19 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
             status = LUA_ERRRUN;
             break;
         }
+        const bool isGlobalLua = fileStr.find("Global.lua") != std::string::npos;
+        if (isGlobalLua) {
+            s_macProgressLine = 0;
+            lua_sethook(L, mac_module_progress_hook, LUA_MASKLINE, 0);
+            fprintf(stderr, "macOS: progress hook installed for %s\n", fileStr.c_str());
+            fflush(stderr);
+        }
         const int callErr = lua_pcall(L, 0, 0, 0);
+        if (isGlobalLua) {
+            lua_sethook(L, nullptr, 0, 0);
+            fprintf(stderr, "macOS: progress hook removed (last line=%d)\n", s_macProgressLine);
+            fflush(stderr);
+        }
         if (callErr != LUA_OK) {
             const char* callErrMsg = lua_tostring(L, -1);
             ui->sys->con->Printf("macOS: PLoad module error: %s\n", callErrMsg ? callErrMsg : "?");
