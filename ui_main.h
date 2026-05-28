@@ -83,10 +83,16 @@ public:
 };
 
 #if __APPLE__ && __MACH__
+typedef bool (*MacPLoadCompileFunc)(lua_State* L, lua_State* co, const char* modname);
 // Stack: [func, arg1..argN] -> [true, ...] or [false, err]. (#8)
 int mac_lightfunc_pcall(lua_State* L, int nargs);
-// Stack: [chunk, arg1..argN]. Run in coroutine; sync globals after via mac_sync_globals_from_helper_co. (#8)
-int mac_pload_coroutine_call(lua_State* L, int extraArgs);
+// Stack: [chunk, arg1..argN]. Run in coroutine; optionally service "__mac_lm"
+// yield requests via compile_fn. (#8)
+int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc compile_fn = nullptr);
+bool mac_is_in_pload();
+void mac_set_in_pload(bool in_pload);
+bool mac_is_servicing_pload_queue();
+void mac_set_servicing_pload_queue(bool servicing);
 // luaJIT_setmode(LUAJIT_MODE_ENGINE|OFF) + flush; Lua jit.off() fallback only. (#8)
 void mac_jit_off(lua_State* L);
 #endif

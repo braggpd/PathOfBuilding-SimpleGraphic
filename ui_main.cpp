@@ -488,7 +488,8 @@ static void mac_replace_broken_ffuncs(lua_State* L, sys_IMain* sys) {
     // Skip "io" — its functions use lj_lib_upvalue internally (not exposed via
     // lua_getupvalue) to set file-handle metatables; converting to LIGHTFUNC
     // strips those hidden upvalues, producing bare userdata from io.open.
-    const char* libs[] = {"table", "os", "debug", "coroutine", nullptr};
+    // Do not convert coroutine.* — yield/resume must stay raw LJLIB_CF (PLoad depends on yield). (#8)
+    const char* libs[] = {"table", "os", "debug", nullptr};
     for (int i = 0; libs[i]; i++) {
         lua_getglobal(L, libs[i]);
         if (lua_istable(L, -1)) {
@@ -515,6 +516,18 @@ static void mac_replace_broken_ffuncs(lua_State* L, sys_IMain* sys) {
 }
 
 static int s_macHelperCoRef = LUA_NOREF;
+static bool s_macInPload = false;
+static bool s_macServicingPloadQueue = false;
+bool mac_is_in_pload() { return s_macInPload; }
+void mac_set_in_pload(bool in_pload) { s_macInPload = in_pload; }
+bool mac_is_servicing_pload_queue() { return s_macServicingPloadQueue; }
+void mac_set_servicing_pload_queue(bool servicing) { s_macServicingPloadQueue = servicing; }
+static ui_main_c* mac_get_ui(lua_State* L) {
+    lua_geti(L, LUA_REGISTRYINDEX, ui_main_c::REGISTRY_KEY);
+    ui_main_c* ui = (ui_main_c*)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    return ui;
+}
 
 void mac_sync_globals_from_helper_co(lua_State* L)
 {
@@ -545,7 +558,7 @@ void mac_sync_globals_from_helper_co(lua_State* L)
 // Uses copy+xmove pattern from CallCallbackOnThread: push copies in reverse, xmove
 // reverses them back to correct order on co. mac_lightfunc_pcall's plain xmove
 // moves co_thread instead of chunk from direct C call sites.
-int mac_pload_coroutine_call(lua_State* L, int extraArgs) {
+int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc compile_fn) {
     mac_restore_raw_coroutine_create(L);
     lua_State* co = lua_newthread(L);           // L = [chunk, args..., co_thread]
     for (int i = extraArgs; i >= 0; --i) {      // push copies in reverse
@@ -560,16 +573,99 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs) {
     s_macHelperCoRef = luaL_ref(L, LUA_REGISTRYINDEX);
     lua_settop(L, 0);
 
-    const int status = lua_resume(co, nullptr, extraArgs);
-    if (status == 0) {
-        const int nres = lua_gettop(co);
+    s_macInPload = true;
+    lua_pushboolean(L, 1);
+    lua_setglobal(L, "__mac_in_pload_flag");
+    int status = lua_resume(co, nullptr, extraArgs);
+    if (ui_main_c* ui = mac_get_ui(L)) {
+        ui->sys->con->Printf("macOS: PLoad initial resume status=%d (YIELD=%d) coTop=%d\n",
+            status, LUA_YIELD, lua_gettop(co));
+    }
+    while (status == LUA_YIELD) {
+        if (ui_main_c* ui = mac_get_ui(L)) {
+            ui->sys->con->Printf("macOS: PLoad yield handler coTop=%d\n", lua_gettop(co));
+        }
+        const int n = lua_gettop(co);
+        if (n != 1 || !lua_istable(co, 1)) {
+            lua_pushliteral(co, "unexpected yield in PLoadModule coroutine");
+            status = LUA_ERRRUN;
+            break;
+        }
+        lua_getfield(co, 1, "tag");
+        const bool isLoadModuleYield = lua_isstring(co, -1) &&
+            strcmp(lua_tostring(co, -1), "__mac_lm") == 0;
+        lua_pop(co, 1);
+        if (!isLoadModuleYield) {
+            lua_pushliteral(co, "unexpected yield in PLoadModule coroutine");
+            status = LUA_ERRRUN;
+            break;
+        }
+        lua_getfield(co, 1, "n");
+        const int nargs = (int)lua_tointeger(co, -1);
+        lua_pop(co, 1);
+        lua_getfield(co, 1, "a1");
+        if (ui_main_c* ui = mac_get_ui(L)) {
+            ui->sys->con->Printf("macOS: PLoad servicing LoadModule %s\n",
+                lua_tostring(co, -1) ? lua_tostring(co, -1) : "?");
+        }
+        lua_pop(co, 1);
+        lua_getglobal(L, "__mac_loadmodule_c");
+        static const char* const argKeys[] = { "a1", "a2", "a3" };
+        const int callArgs = nargs > 3 ? 3 : (nargs > 0 ? nargs : 0);
+        for (int i = 0; i < callArgs; i++) {
+            lua_getfield(co, 1, argKeys[i]);
+        }
+        if (callArgs > 0) {
+            lua_xmove(co, L, callArgs);
+        }
+        s_macServicingPloadQueue = true;
         lua_pushboolean(L, 1);
-        if (nres > 0) lua_xmove(co, L, nres);
-        return nres + 1;
+        lua_setglobal(L, "__mac_servicing_lm_flag");
+        lua_call(L, callArgs, 0);
+        lua_pushboolean(L, 0);
+        lua_setglobal(L, "__mac_servicing_lm_flag");
+        s_macServicingPloadQueue = false;
+        int resumeArgs = 0;
+        lua_getglobal(L, "__mac_loadmodule_result");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "n");
+            const int retN = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            const char* rnames[] = {"r1", "r2", "r3"};
+            for (int i = 0; i < retN && i < 3; i++) {
+                lua_getfield(L, -1, rnames[i]);
+                resumeArgs++;
+            }
+            lua_pushnil(L);
+            lua_setglobal(L, "__mac_loadmodule_result");
+        } else {
+            lua_pop(L, 1);
+        }
+        lua_pop(co, 1); // single yield table only — preserve suspended call frames
+        if (resumeArgs > 0) {
+            lua_xmove(L, co, resumeArgs);
+        }
+        lua_settop(L, 0);
+        status = lua_resume(co, nullptr, resumeArgs);
+        if (ui_main_c* ui = mac_get_ui(L)) {
+            ui->sys->con->Printf("macOS: PLoad resume status=%d coTop=%d (resumeArgs=%d)\n",
+                status, lua_gettop(co), resumeArgs);
+        }
+    }
+    s_macInPload = false;
+    lua_pushboolean(L, 0);
+    lua_setglobal(L, "__mac_in_pload_flag");
+    if (status == 0) {
+        if (ui_main_c* ui = mac_get_ui(L)) {
+            ui->sys->con->Printf("macOS: PLoad coroutine finished OK (coTop=%d)\n", lua_gettop(co));
+        }
+        lua_pushboolean(L, 1);
+        // Do not xmove return values from co (GC64); use mac_sync_globals_from_helper_co.
+        return 1;
     }
     lua_pushboolean(L, 0);
-    if (lua_gettop(co) > 0) {
-        lua_xmove(co, L, 1);
+    if (lua_gettop(co) > 0 && lua_isstring(co, -1)) {
+        lua_pushstring(L, lua_tostring(co, -1));
     } else {
         lua_pushliteral(L, "PLoadModule: unknown error");
     }
@@ -660,6 +756,16 @@ static int l_mac_run_chunk(lua_State* L) {
     }
     lua_remove(L, 1);
     return mac_run_chunk_result_table(L, true, 1);
+}
+
+static int l_mac_in_pload(lua_State* L) {
+    lua_pushboolean(L, s_macInPload);
+    return 1;
+}
+
+// Yield to mac_pload_coroutine_call with one table arg (request). (#8)
+static int l_mac_lm_yield(lua_State* L) {
+    return lua_yield(L, 1);
 }
 
 static int l_mac_setmetatable(lua_State* L) {
@@ -974,6 +1080,13 @@ static void mac_run_after_main_if_requested(lua_State* L, ui_main_c* ui) {
     lua_pop(L, 2);
 
     ui->sys->con->Printf("macOS: PLoadModule Modules/Main from C...\n");
+    lua_getglobal(L, "__mac_loadmodule_c");
+    const int lmIsC = lua_iscfunction(L, -1) ? 1 : 0;
+    ui->sys->con->Printf("macOS: __mac_loadmodule_c type=%s isc=%d\n", luaL_typename(L, -1), lmIsC);
+    lua_pop(L, 1);
+    lua_getglobal(L, "LoadModule");
+    ui->sys->con->Printf("macOS: LoadModule type=%s isc=%d\n", luaL_typename(L, -1), lua_iscfunction(L, -1) ? 1 : 0);
+    lua_pop(L, 1);
     if (!mac_pload_module_pcall(L, "Modules/Main")) {
         const char* err = lua_tostring(L, -1);
         ui->sys->con->Printf("PLoadModule failed: %s\n", err ? err : "(no message)");
@@ -1653,6 +1766,12 @@ void ui_main_c::ScriptInit()
 	lua_pushcfunction(L, l_mac_xpcall);  lua_setglobal(L, "xpcall");
 	lua_pushcfunction(L, l_mac_run_chunk); lua_setglobal(L, "__mac_run_chunk");
 	lua_pushcfunction(L, l_mac_call_chunk); lua_setglobal(L, "__mac_call_chunk");
+	lua_pushcfunction(L, l_mac_in_pload); lua_setglobal(L, "__mac_in_pload_c");
+	lua_pushcfunction(L, l_mac_lm_yield); lua_setglobal(L, "__mac_lm_yield_c");
+	lua_pushboolean(L, 0);
+	lua_setglobal(L, "__mac_in_pload_flag");
+	lua_pushboolean(L, 0);
+	lua_setglobal(L, "__mac_servicing_lm_flag");
 	lua_pushcfunction(L, l_mac_restore_co); lua_setglobal(L, "__mac_restore_co");
 	lua_pushcfunction(L, l_mac_prerequire); lua_setglobal(L, "MacPrerequire");
 	sys->con->Printf("macOS: require/loadfile/pcall/xpcall replaced for GC64.\n");
@@ -1714,6 +1833,12 @@ void ui_main_c::ScriptInit()
 	    "  local function wrapLoadModule(c, g, stash)\n"
 	    "    _G[c] = _G[g]\n"
 	    "    _G[g] = function(...)\n"
+	    "      if __mac_in_pload_flag and not __mac_servicing_lm_flag then\n"
+	    "        local n = select(\"#\", ...)\n"
+	    "        local req = { tag = \"__mac_lm\", n = n }\n"
+	    "        for i = 1, n do req[\"a\"..i] = select(i, ...) end\n"
+	    "        return __mac_lm_yield_c(req)\n"
+	    "      end\n"
 	    "      _G[c](...)\n"
 	    "      local r = _G[stash]\n"
 	    "      _G[stash] = nil\n"
@@ -1732,6 +1857,15 @@ void ui_main_c::ScriptInit()
 		sys->con->Printf("Warning: macOS return API wraps failed: %s\n", lua_tostring(L, -1));
 		lua_pop(L, 1);
 	}
+	lua_getglobal(L, "coroutine");
+	lua_getfield(L, -1, "yield");
+	sys->con->Printf("macOS: coroutine.yield is %s (isc=%d)\n", luaL_typename(L, -1),
+	                 lua_iscfunction(L, -1) ? 1 : 0);
+	lua_pop(L, 2);
+	lua_getglobal(L, "LoadModule");
+	sys->con->Printf("macOS: LoadModule is %s (isc=%d)\n", luaL_typename(L, -1),
+	                 lua_iscfunction(L, -1) ? 1 : 0);
+	lua_pop(L, 1);
 
 	// bit.* are LJLIB_CF functions in LuaJIT 2.1 — 0-upvalue C closures that
 	// don't have GC interaction issues. Only replace tohex (formatting helper)

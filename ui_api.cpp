@@ -8,6 +8,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <vector>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <zlib.h>
@@ -2039,18 +2043,249 @@ static void mac_push_plm_result(lua_State* L, bool ok, int errIndex)
 		lua_settop(L, 1);
 		return;
 	}
-	lua_remove(L, 1); // drop success flag from mac_lightfunc_pcall
-	lua_createtable(L, 0, 2);
+	lua_remove(L, 1); // drop success flag from mac_pload_coroutine_call
+	lua_createtable(L, 0, 1);
 	lua_pushnil(L);
 	lua_setfield(L, -2, "err");
-	// Do not lua_getglobal/copy main here (can panic on arm64 GC64); use global main for Init. (#8)
-	if (lua_gettop(L) >= 1) {
-		lua_pushvalue(L, 1);
-		lua_setfield(L, -2, "main");
-		lua_remove(L, 1);
-	}
+	// Do not copy return values from the PLoad coroutine (GC64 SIGBUS); main comes from
+	// mac_sync_globals_from_helper_co after PLoadModule returns. (#8)
 	lua_replace(L, 1);
 	lua_settop(L, 1);
+}
+
+static bool mac_run_loaded_chunk_fresh_co(lua_State* L, int firstIdx, int nargs, const char** errOut);
+static void mac_trace_stack_window(lua_State* L, const char* tag, int fromIdx, int toIdx);
+static int l_mac_service_lm_queue(lua_State* L);
+
+static bool mac_bisect_global_enabled()
+{
+	const char* v = std::getenv("POB_MAC_BISECT_GLOBAL");
+	return v && v[0] != '\0' && v[0] != '0';
+}
+
+static std::pair<int, int> mac_bisect_line_range()
+{
+	int start = 1;
+	int end = INT_MAX;
+	if (const char* lines = std::getenv("POB_MAC_BISECT_LINES")) {
+		int a = 0;
+		int b = 0;
+		if (std::sscanf(lines, "%d-%d", &a, &b) == 2 && a > 0 && b >= a) {
+			start = a;
+			end = b;
+		}
+	}
+	if (const char* s = std::getenv("POB_MAC_BISECT_START")) {
+		const int v = std::atoi(s);
+		if (v > 0) {
+			start = v;
+		}
+	}
+	if (const char* e = std::getenv("POB_MAC_BISECT_END")) {
+		const int v = std::atoi(e);
+		if (v > 0) {
+			end = v;
+		}
+	}
+	return { start, end };
+}
+
+// Run only lines [startLine..endLine] of Global.lua (1-based, inclusive). (#8 bisect)
+static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
+                                      int startLine, int requestedEndLine)
+{
+	int endLine = requestedEndLine;
+	std::ifstream in(filePath);
+	if (!in) {
+		ui->sys->con->Printf("BISECT: cannot open %s\n", filePath.generic_u8string().c_str());
+		return false;
+	}
+	std::vector<std::string> lines;
+	std::string line;
+	while (std::getline(in, line)) {
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		lines.push_back(line);
+	}
+	if (endLine > (int)lines.size()) {
+		endLine = (int)lines.size();
+	}
+	if (startLine < 1 || startLine > endLine) {
+		ui->sys->con->Printf("BISECT: invalid range %d-%d (file has %zu lines)\n", startLine, endLine,
+		                     lines.size());
+		return false;
+	}
+
+	auto trim_line = [](const std::string& s) {
+		size_t a = 0;
+		while (a < s.size() && (s[a] == ' ' || s[a] == '\t')) {
+			a++;
+		}
+		size_t b = s.size();
+		while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r')) {
+			b--;
+		}
+		return s.substr(a, b - a);
+	};
+	auto strip_lua_comment = [&](std::string s) {
+		const size_t pos = s.find("--");
+		if (pos != std::string::npos) {
+			s = s.substr(0, pos);
+		}
+		return trim_line(s);
+	};
+	auto strip_trailing_comma = [&](std::string s) {
+		s = strip_lua_comment(std::move(s));
+		while (!s.empty() && s.back() == ',') {
+			s.pop_back();
+			s = trim_line(s);
+		}
+		return s;
+	};
+	auto looks_like_table_entry = [&](const std::string& s) {
+		const std::string t = strip_lua_comment(s);
+		if (t.empty() || t[0] == '-' || t.find('=') == std::string::npos) {
+			return false;
+		}
+		if (t.rfind("local ", 0) == 0 || t.rfind("function ", 0) == 0 || t.rfind("end", 0) == 0) {
+			return false;
+		}
+		return t.back() == ',' || t.back() == '}' || t == "}";
+	};
+	auto find_enclosing_table = [&](int fromLine) -> std::string {
+		for (int i = fromLine - 2; i >= 0; i--) {
+			const std::string t = trim_line(lines[(size_t)i]);
+			const size_t eq = t.find('=');
+			if (eq == std::string::npos) {
+				continue;
+			}
+			const size_t brace = t.find('{', eq);
+			if (brace != std::string::npos) {
+				std::string name = trim_line(t.substr(0, eq));
+				const size_t dot = name.rfind('.');
+				if (dot != std::string::npos) {
+					name = name.substr(dot + 1);
+				}
+				return name;
+			}
+		}
+		return {};
+	};
+
+	std::ostringstream chunk;
+	chunk << "-- macOS bisect slice " << startLine << '-' << endLine << '\n';
+	chunk << "do\n";
+	std::string wrapTable;
+	int assignFrom = startLine - 1; // 0-based index of first line to emit as assignments
+	for (int i = startLine - 1; i < endLine; i++) {
+		const std::string t = strip_lua_comment(lines[(size_t)i]);
+		if (t.empty() || t[0] == '-') {
+			continue;
+		}
+		const size_t eq = t.find('=');
+		if (eq == std::string::npos) {
+			continue;
+		}
+		const size_t brace = t.find('{', eq);
+		if (brace != std::string::npos) {
+			wrapTable = trim_line(t.substr(0, eq));
+			const size_t dot = wrapTable.rfind('.');
+			if (dot != std::string::npos) {
+				wrapTable = wrapTable.substr(dot + 1);
+			}
+			assignFrom = i + 1;
+			break;
+		}
+		if (looks_like_table_entry(lines[(size_t)i])) {
+			wrapTable = find_enclosing_table(i + 1);
+			assignFrom = i;
+			break;
+		}
+	}
+	// Assignment slices only work inside table literals; mid-function ranges use raw + brace balance.
+	const bool useAssignments = !wrapTable.empty() &&
+	    (startLine == 1 || looks_like_table_entry(lines[(size_t)startLine - 1]) ||
+	     strip_lua_comment(lines[(size_t)startLine - 1]).find("= {") != std::string::npos);
+	if (useAssignments) {
+		if (wrapTable.empty()) {
+			wrapTable = "__mac_bisect_tbl";
+		}
+		chunk << wrapTable << " = " << wrapTable << " or {}\n";
+		for (int i = assignFrom; i < endLine; i++) {
+			const std::string t = strip_lua_comment(lines[(size_t)i]);
+			if (t.empty() || t[0] == '-') {
+				continue;
+			}
+			const size_t eq = t.find('=');
+			if (eq == std::string::npos) {
+				continue;
+			}
+			std::string key = trim_line(t.substr(0, eq));
+			std::string val = strip_trailing_comma(t.substr(eq + 1));
+			if (key.empty() || val.empty()) {
+				continue;
+			}
+			if (key == "return" || key == "break" || key == "elseif" || key == "else" || key == "end" ||
+			    key == "local" || key == "function" || key == "do" || key == "then") {
+				continue;
+			}
+			if (key == "or" || key == "and" || key == "not" || key == "OR" || key == "AND" || key == "NOT") {
+				chunk << wrapTable << "[\"" << key << "\"] = " << val << "\n";
+			} else {
+				chunk << wrapTable << "." << key << " = " << val << "\n";
+			}
+		}
+	} else {
+		for (int i = startLine - 1; i < endLine; i++) {
+			chunk << lines[(size_t)i] << '\n';
+		}
+		if (startLine == 1) {
+			int openBraces = 0;
+			for (int i = 0; i < endLine; i++) {
+				for (char c : lines[(size_t)i]) {
+					if (c == '{') {
+						openBraces++;
+					} else if (c == '}') {
+						openBraces--;
+					}
+				}
+			}
+			for (int i = 0; i < openBraces; i++) {
+				chunk << "}\n";
+			}
+		}
+	}
+	chunk << "end\n";
+
+	ui->sys->SetWorkDir(ui->scriptPath);
+	const std::string chunkStr = chunk.str();
+	const std::string chunkName = filePath.generic_u8string() + ":" + std::to_string(startLine) + '-' +
+	                            std::to_string(endLine);
+	int loadErr = luaL_loadbuffer(L, chunkStr.c_str(), chunkStr.size(), chunkName.c_str());
+	ui->sys->SetWorkDir(ui->scriptWorkDir);
+	if (loadErr != LUA_OK) {
+		ui->sys->con->Printf("BISECT: load lines %d-%d failed: %s\n", startLine, endLine,
+		                     lua_tostring(L, -1));
+		lua_settop(L, 0);
+		return false;
+	}
+	const int runErr = lua_pcall(L, 0, 0, 0);
+	if (runErr != LUA_OK) {
+		ui->sys->con->Printf("BISECT: run lines %d-%d failed: %s\n", startLine, endLine,
+		                     lua_tostring(L, -1));
+		lua_settop(L, 0);
+		return false;
+	}
+	if (useAssignments && !wrapTable.empty()) {
+		ui->sys->con->Printf("macOS BISECT: executed lines %d-%d as %s.* assignments\n", startLine, endLine,
+		                     wrapTable.c_str());
+	} else {
+		ui->sys->con->Printf("macOS BISECT: executed lines %d-%d (requested %d)\n", startLine, endLine,
+		                     requestedEndLine);
+	}
+	lua_settop(L, 0);
+	return true;
 }
 
 static int l_LoadModule(lua_State* L)
@@ -2066,26 +2301,35 @@ static int l_LoadModule(lua_State* L)
 	const int extraArgs = n - 1;
 	auto filePath = mac_module_file_path(ui, lua_tostring(L, 1));
 	auto fileStr = filePath.generic_u8string();
-
+	if (mac_bisect_global_enabled() && fileStr.find("Data/Global.lua") != std::string::npos) {
+		const auto range = mac_bisect_line_range();
+		ui->sys->con->Printf("macOS BISECT: Global.lua lines %d-%d\n", range.first, range.second);
+		if (!mac_load_global_lua_slice(L, ui, filePath, range.first, range.second)) {
+			ui->sys->con->Printf("macOS BISECT: Global.lua slice FAILED — exiting\n");
+			std::exit(1);
+		}
+		ui->sys->con->Printf("macOS BISECT: Global.lua slice OK — exiting (do not continue Data.lua)\n");
+		std::exit(0); // bisect probes must not return into Data.lua / Misc.lua loads
+	}
 	ui->sys->SetWorkDir(ui->scriptPath);
 	int err = luaL_loadfile(L, fileStr.c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	if (err != 0) {
+		const char* msg = lua_tostring(L, -1);
 		luaL_error(L, "LoadModule() error loading '%s' (%d):\n%s", fileStr.c_str(), err,
-		           lua_tostring(L, -1));
+		           msg ? msg : "unknown error");
 	}
 	lua_replace(L, 1);
 	ui->sys->con->Printf("macOS: LoadModule running %s (%d args)\n", fileStr.c_str(), extraArgs);
-	// arm64 GC64: lua_call crashes at NULL+0x28 when nested 2+ levels inside
-	// a lua_resume coroutine. lua_pcall is safe inside coroutines and lets
-	// errors propagate to the outer lua_resume frame. (#8)
-	int runErr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
-	if (runErr != 0) {
-		const char* msg = lua_tostring(L, -1);
-		ui->sys->con->Printf("macOS: LoadModule error %s: %s\n", fileStr.c_str(),
-			msg ? msg : "unknown error");
-		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
-			msg ? msg : "unknown error");
+	// arm64 GC64: run serviced/nested chunks in a fresh coroutine (root lua_call can SIGSEGV on Global.lua).
+	const char* coErr = nullptr;
+	if (mac_is_servicing_pload_queue()) {
+		if (!mac_run_loaded_chunk_fresh_co(L, 1, extraArgs, &coErr)) {
+			luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
+			           coErr ? coErr : "unknown error");
+		}
+	} else {
+		lua_call(L, extraArgs, LUA_MULTRET);
 	}
 	int nresults = lua_gettop(L);
 	ui->sys->con->Printf("macOS: LoadModule done %s (%d returns)\n", fileStr.c_str(), nresults);
@@ -2105,6 +2349,115 @@ static int l_LoadModule(lua_State* L)
 	}
 	lua_settop(L, 0);
 	return 0;
+}
+
+static int l_mac_service_lm_queue(lua_State* L)
+{
+	if (mac_is_servicing_pload_queue()) {
+		lua_settop(L, 0);
+		return 0;
+	}
+	mac_set_servicing_pload_queue(true);
+	for (int guard = 0; guard < 256; guard++) {
+		lua_getglobal(L, "__mac_lm_q_head");
+		int head = (int)lua_tointeger(L, -1);
+		lua_pop(L, 1);
+		if (head <= 0) head = 1;
+		lua_getglobal(L, "__mac_lm_q_tail");
+		int tail = (int)lua_tointeger(L, -1);
+		lua_pop(L, 1);
+		if (head > tail) {
+			break;
+		}
+		lua_getglobal(L, "__mac_lm_queue");
+		if (!lua_istable(L, -1)) {
+			mac_set_servicing_pload_queue(false);
+			lua_settop(L, 0);
+			luaL_error(L, "__mac_lm_queue is not a table");
+		}
+		lua_rawgeti(L, -1, head);
+		if (!lua_istable(L, -1)) {
+			mac_set_servicing_pload_queue(false);
+			lua_settop(L, 0);
+			luaL_error(L, "__mac_lm_queue[%d] missing", head);
+		}
+		const int reqIdx = lua_gettop(L);
+		lua_getfield(L, reqIdx, "name");
+		if (!lua_isstring(L, -1)) {
+			mac_set_servicing_pload_queue(false);
+			lua_settop(L, 0);
+			luaL_error(L, "__mac_lm_queue[%d].name missing", head);
+		}
+		lua_getfield(L, reqIdx, "n");
+		const int nargs = (int)lua_tointeger(L, -1);
+		lua_pop(L, 1);
+		lua_pushnil(L);
+		lua_rawseti(L, -3, head); // queue[head] = nil
+		head++;
+		lua_pushinteger(L, head);
+		lua_setglobal(L, "__mac_lm_q_head");
+
+		lua_getglobal(L, "__mac_loadmodule_c");
+		lua_pushvalue(L, reqIdx + 1); // name
+		const char* anames[] = { "a1", "a2", "a3" };
+		for (int i = 0; i < nargs && i < 3; i++) {
+			lua_getfield(L, reqIdx, anames[i]);
+		}
+		lua_pushboolean(L, 1);
+		lua_setglobal(L, "__mac_lm_allow_one");
+		lua_call(L, 1 + (nargs > 3 ? 3 : nargs), 0);
+		lua_settop(L, 0);
+	}
+	mac_set_servicing_pload_queue(false);
+	lua_settop(L, 0);
+	return 0;
+}
+
+// Run loaded chunk [firstIdx] with nargs in a fresh coroutine rooted at L.
+// On success, preserves stack below firstIdx-1 and leaves only return values
+// on top (same shape as lua_pcall would leave for function+args region).
+static bool mac_run_loaded_chunk_fresh_co(lua_State* L, int firstIdx, int nargs, const char** errOut)
+{
+	lua_State* co = lua_newthread(L); // thread object kept on root stack
+	for (int i = nargs; i >= 0; --i) {
+		lua_pushvalue(L, firstIdx + i);
+	}
+	lua_xmove(L, co, nargs + 1);
+	const int status = lua_resume(co, nullptr, nargs);
+	if (status == LUA_OK) {
+		const int nres = lua_gettop(co);
+		lua_settop(L, firstIdx - 1);
+		if (nres > 0) {
+			lua_xmove(co, L, nres);
+		}
+		return true;
+	}
+	if (errOut) {
+		if (lua_gettop(co) > 0) {
+			*errOut = lua_tostring(co, -1);
+		} else if (status == LUA_YIELD) {
+			*errOut = "unexpected yield while running module chunk";
+		} else {
+			*errOut = "unknown error";
+		}
+	}
+	lua_settop(L, firstIdx - 1);
+	return false;
+}
+
+static void mac_trace_stack_window(lua_State* L, const char* tag, int fromIdx, int toIdx)
+{
+	if (fromIdx > toIdx) {
+		fprintf(stderr, "macOS TRACE %s stack-empty from=%d to=%d top=%d\n",
+		        tag, fromIdx, toIdx, lua_gettop(L));
+		return;
+	}
+	fprintf(stderr, "macOS TRACE %s stack from=%d to=%d top=%d\n",
+	        tag, fromIdx, toIdx, lua_gettop(L));
+	for (int i = fromIdx; i <= toIdx; i++) {
+		const char* t = luaL_typename(L, i);
+		fprintf(stderr, "macOS TRACE   [%d] %s ptr=%p\n", i, t, lua_topointer(L, i));
+	}
 }
 
 // Stack: [modName, optional extra args...]. Sets __mac_pload_result; clears stack. (#8)
@@ -2130,15 +2483,20 @@ static bool mac_run_pload_module_impl(lua_State* L, ui_main_c* ui, int extraArgs
 		return false;
 	}
 	lua_replace(L, 1);
-	// Use mac_lightfunc_pcall (coroutine) so LoadModule can safely use lua_call.
-	// lua_call-inside-lua_pcall on the main state crashes arm64 GC64 (NULL+0x28 deref in
-	// lj_vm_call — cframe chain invalid without an outer setjmp frame from lua_resume).
-	// lua_pcall 3+ deep hangs. A fresh coroutine has its own cframe base, avoiding both.
-	// Safe here: called from C top level in mac_run_after_main_if_requested, not inside
-	// any lua_pcall frame. l_mac_pcall/require use lua_pcall (no nested lua_resume). (#8)
-	mac_pload_coroutine_call(L, extraArgs);
-	// mac_pload_coroutine_call leaves [bool, results...] — same layout expected by mac_push_plm_result.
-	const bool ok = lua_toboolean(L, 1);
+	// Coroutine + __mac_lm yield: nested loads run on root via lua_call (no nested pcall). (#8)
+	const int nret = mac_pload_coroutine_call(L, extraArgs, nullptr);
+	const bool ok = nret >= 1 && lua_toboolean(L, 1);
+	if (!ok && nret < 2) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "PLoadModule: coroutine failed");
+		lua_insert(L, 1);
+	}
+	if (!ok) {
+		ui->sys->con->Printf("macOS: PLoad fail detail top=%d type2=%s msg=%s\n",
+			lua_gettop(L),
+			lua_gettop(L) >= 2 ? luaL_typename(L, 2) : "none",
+			(lua_gettop(L) >= 2 && lua_isstring(L, 2)) ? lua_tostring(L, 2) : "(non-string)");
+	}
 	ui->sys->con->Printf("macOS: PLoadModule %s %s\n", fileStr.c_str(), ok ? "OK" : "failed");
 	mac_push_plm_result(L, ok, 2);
 	lua_pushvalue(L, 1);
@@ -2775,6 +3133,8 @@ int ui_main_c::InitAPI(lua_State* L)
 #if __APPLE__ && __MACH__
 	lua_pushcfunction(L, l_mac_PLoadModule);
 	lua_setglobal(L, "PLoadModule");
+	lua_pushcfunction(L, l_mac_service_lm_queue);
+	lua_setglobal(L, "__mac_service_lm_queue_c");
 #endif
 	ADDFUNC(PCall);
 #if __APPLE__ && __MACH__

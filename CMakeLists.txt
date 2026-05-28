@@ -132,6 +132,9 @@ target_include_directories(SimpleGraphic
     "${CMAKE_CURRENT_SOURCE_DIR}/engine"
 )
 
+if (APPLE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacosFixVcpkgReleaseOnly.cmake")
+endif ()
 find_package(unofficial-angle CONFIG REQUIRED)
 find_package(CURL CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
@@ -268,10 +271,14 @@ if (APPLE)
         OUTPUT_NAME "Path of Building-PoE2"
     )
     target_link_libraries(${PoB_HOST_TARGET} PRIVATE SimpleGraphic)
+    # Support both launch layouts:
+    # 1) .app bundle:    @executable_path/../Frameworks
+    # 2) flat dev binary @executable_path (runtime-macos/)
+    set(_macos_host_rpath "@executable_path/../Frameworks;@executable_path;@loader_path")
     set_target_properties(SimpleGraphic ${PoB_HOST_TARGET}
         PROPERTIES
-            BUILD_RPATH "@executable_path;@loader_path"
-            INSTALL_RPATH "@executable_path;@loader_path"
+            BUILD_RPATH "${_macos_host_rpath}"
+            INSTALL_RPATH "${_macos_host_rpath}"
             MACOSX_RPATH ON
     )
 endif ()
