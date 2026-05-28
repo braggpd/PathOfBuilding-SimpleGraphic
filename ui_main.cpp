@@ -1859,11 +1859,10 @@ void ui_main_c::ScriptInit()
 	                 lua_iscfunction(L, -1) ? 1 : 0);
 	lua_pop(L, 1);
 
-	// bit.* are LJLIB_CF functions in LuaJIT 2.1 — 0-upvalue C closures that
-	// don't have GC interaction issues. Only replace tohex (formatting helper)
-	// and keep originals for int64 cdata support needed by sha2.lua FFI branch. (#8)
+	// bit.* in LuaJIT 2.1 are LJLIB_ASM — broken assembly dispatch on arm64 GC64.
+	// Replace all with LIGHTFUNC (plain C) implementations. 32-bit semantics only;
+	// sha2.lua int64 cdata branch is not used in PoB. (#8)
 	{
-#if 0 // Disabled: originals handle int64 cdata; our replacements don't
 		auto tobit = [](lua_State* L) -> int {
 			lua_pushnumber(L, (int32_t)luaL_checknumber(L, 1));
 			return 1;
@@ -1930,27 +1929,26 @@ void ui_main_c::ScriptInit()
 			lua_pushnumber(L, (int32_t)v);
 			return 1;
 		};
-
-		lua_createtable(L, 0, 11);
 		struct { const char* name; lua_CFunction fn; } ops[] = {
 			{"tobit", tobit}, {"bnot", bnot}, {"bor", bor}, {"band", band},
 			{"bxor", bxor}, {"lshift", lshift}, {"rshift", rshift},
 			{"arshift", arshift}, {"rol", rol}, {"ror", ror}, {"bswap", bswap},
 		};
+		lua_createtable(L, 0, 11);
 		for (auto& op : ops) {
 			lua_pushcfunction(L, op.fn);
 			lua_setfield(L, -2, op.name);
 		}
-		lua_pop(L, 1); // pop unused table
-#endif
-		// Keep the original LuaJIT bit module — it handles int64 cdata correctly.
-		// Just ensure it's accessible as a global and in package.loaded.
-		lua_pushcfunction(L, [](lua_State* L) -> int {
-			lua_pushinteger(L, 42);
-			return 1;
-		});
-		lua_setglobal(L, "__mac_bit_tobit");
-		sys->con->Printf("macOS: bit.* kept as original LuaJIT builtins (int64 cdata support).\n");
+		// Install as bit global and in package.loaded so require('bit') returns it.
+		lua_pushvalue(L, -1);
+		lua_setglobal(L, "bit");
+		lua_getglobal(L, "package");
+		lua_getfield(L, -1, "loaded");
+		lua_pushvalue(L, -3); // bit table
+		lua_setfield(L, -2, "bit");
+		lua_pop(L, 2); // loaded, package
+		lua_pop(L, 1); // bit table
+		sys->con->Printf("macOS: bit.* replaced with LIGHTFUNC (32-bit, arm64 GC64 safe).\n");
 	}
 	lua_pushcfunction(L, l_mac_setmetatable);
 	lua_setglobal(L, "setmetatable");
