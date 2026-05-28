@@ -2327,7 +2327,7 @@ static int l_LoadModule(lua_State* L)
 	if (installHook) {
 		s_lmProgressLine = 0;
 		lua_sethook(L, [](lua_State*, lua_Debug* ar) {
-			if (ar->currentline > 0 && ar->currentline >= s_lmProgressLine + 100) {
+			if (ar->currentline > 400 && ar->currentline >= s_lmProgressLine + 10) {
 				s_lmProgressLine = ar->currentline;
 				fprintf(stderr, "macOS: LoadModule progress line %d\n", ar->currentline);
 				fflush(stderr);
