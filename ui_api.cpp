@@ -2311,36 +2311,30 @@ static int l_LoadModule(lua_State* L)
 		ui->sys->con->Printf("macOS BISECT: Global.lua slice OK — exiting (do not continue Data.lua)\n");
 		std::exit(0); // bisect probes must not return into Data.lua / Misc.lua loads
 	}
-	// Diagnostic: track file+line every 50 lines to find new crash location (#8)
-	static const char* s_diagSrc = nullptr;
-	static int s_diagBucket = -1;
-	s_diagSrc = nullptr;
-	s_diagBucket = -1;
-	lua_sethook(L, [](lua_State* L2, lua_Debug* ar) {
-		lua_getinfo(L2, "Sl", ar);
-		if (strstr(ar->short_src, "Global.lua")) {
-			// Print every line in Global.lua for exact crash location
-			fprintf(stderr, "macOS: Global.lua:%d\n", ar->currentline);
-			fflush(stderr);
-		} else if (ar->source != s_diagSrc || ar->currentline / 50 != s_diagBucket) {
-			s_diagSrc = ar->source;
-			s_diagBucket = ar->currentline / 50;
-			fprintf(stderr, "macOS: %s:%d\n", ar->short_src, ar->currentline);
-			fflush(stderr);
-		}
-	}, LUA_MASKLINE, 0);
+	// LuaJIT arm64 GC64: incremental GC steps triggered by allocations inside the
+	// interpreter loop truncate 64-bit GCobj pointers to 32 bits when traversing
+	// table entries. If the lower 32 bits are 0 (object at a 4GB-multiple address)
+	// the traversal reads from address 0 → SIGSEGV (EXC_BAD_ACCESS, FAR=0). (#8)
+	// Stop incremental GC for the duration of this LoadModule call. Depth-counted
+	// so nested LoadModule calls don't prematurely restart GC.
+	static int s_gcStopDepth = 0;
+	if (s_gcStopDepth == 0) lua_gc(L, LUA_GCSTOP, 0);
+	s_gcStopDepth++;
+
 	ui->sys->SetWorkDir(ui->scriptPath);
 	int err = luaL_loadfile(L, fileStr.c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	if (err != 0) {
-		lua_sethook(L, nullptr, 0, 0);
+		s_gcStopDepth--;
+		if (s_gcStopDepth == 0) lua_gc(L, LUA_GCRESTART, 0);
 		const char* msg = lua_tostring(L, -1);
 		luaL_error(L, "LoadModule() error loading '%s' (%d):\n%s", fileStr.c_str(), err,
 		           msg ? msg : "unknown error");
 	}
 	lua_replace(L, 1);
 	const int runErr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
-	lua_sethook(L, nullptr, 0, 0);
+	s_gcStopDepth--;
+	if (s_gcStopDepth == 0) lua_gc(L, LUA_GCRESTART, 0);
 	if (runErr != LUA_OK) {
 		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
 		           lua_tostring(L, -1));
