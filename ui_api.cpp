@@ -2318,7 +2318,11 @@ static int l_LoadModule(lua_State* L)
 	s_diagBucket = -1;
 	lua_sethook(L, [](lua_State* L2, lua_Debug* ar) {
 		lua_getinfo(L2, "Sl", ar);
-		if (ar->source != s_diagSrc || ar->currentline / 50 != s_diagBucket) {
+		if (strstr(ar->short_src, "Global.lua")) {
+			// Print every line in Global.lua for exact crash location
+			fprintf(stderr, "macOS: Global.lua:%d\n", ar->currentline);
+			fflush(stderr);
+		} else if (ar->source != s_diagSrc || ar->currentline / 50 != s_diagBucket) {
 			s_diagSrc = ar->source;
 			s_diagBucket = ar->currentline / 50;
 			fprintf(stderr, "macOS: %s:%d\n", ar->short_src, ar->currentline);
