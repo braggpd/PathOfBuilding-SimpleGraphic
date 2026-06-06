@@ -307,7 +307,11 @@ bool ui_subscript_c::Start()
 	errorStr = NULL;
 
 	// Initialise Lua
+#if __APPLE__ && __MACH__
+	L = lua_newstate(mac_gc64_alloc, nullptr);
+#else
 	L = luaL_newstate();
+#endif
 	if ( !L ) return false;
 	lua_atpanic(L, l_panicFunc);
 	lua_pushlightuserdata(L, this);

@@ -14,6 +14,42 @@
 // coroutine — lua_pcall from inside a LIGHTFUNC corrupts interpreter return state. (#8)
 
 #if __APPLE__ && __MACH__
+// LuaJIT arm64 GC64: several bytecode handlers contain 32-bit loads for
+// GCobj pointers (e.g. BC_GGET). When an object sits at a 4GB-multiple
+// address (lower 32 bits = 0x0) the truncated read yields NULL, triggering
+// EXC_BAD_ACCESS at FAR=0x0. Fix: custom allocator installed via
+// lua_newstate that reserves 16 bytes before every user pointer. The
+// 1-byte offset field stored at user[-1] allows safe free/realloc. If
+// user = raw+16 would itself land on a 4GB boundary, offset 8 is used
+// instead (raw+8 can never simultaneously be at a boundary). (#8)
+void* mac_gc64_alloc(void* /*ud*/, void* ptr, size_t osize, size_t nsize) {
+    // Layout: [raw ... (off-1 padding bytes) ... offset_byte ... user_data(nsize)]
+    // off = 16 normally; off = 8 when raw+16 lower-32 == 0.
+    if (nsize == 0) {
+        if (ptr) {
+            uint8_t off = *((uint8_t*)ptr - 1);
+            free((char*)ptr - off);
+        }
+        return nullptr;
+    }
+    char* raw = nullptr;
+    uint8_t old_off = 16;
+    if (ptr) {
+        old_off = *((uint8_t*)ptr - 1);
+        raw = (char*)realloc((char*)ptr - old_off, nsize + 16);
+    } else {
+        raw = (char*)malloc(nsize + 16);
+    }
+    if (!raw) return nullptr;
+    uint8_t new_off = (((uintptr_t)(raw + 16)) & 0xFFFFFFFFu) == 0u ? 8u : 16u;
+    if (ptr && new_off != old_off) {
+        size_t copy = nsize < osize ? nsize : osize;
+        memmove(raw + new_off, raw + old_off, copy);
+    }
+    *((uint8_t*)(raw + new_off) - 1) = new_off;
+    return raw + new_off;
+}
+
 // Copy launch from helper thread into uicallbacks.MainObject (SetMainObject from co is unreliable). (#8)
 static void mac_sync_main_object_from_co(lua_State* L, lua_State* co) {
 	lua_getglobal(co, "launch");
@@ -1650,15 +1686,26 @@ void ui_main_c::ScriptInit()
 
 	// Initialise Lua
 	sys->con->Printf("Initialising Lua...\n");
-	solState.emplace();
-	L = solState->lua_state();
-	if ( !L ) sys->Error("Error: unable to create Lua state.");
 #if __APPLE__ && __MACH__
+	// Use lua_newstate with our custom allocator so ALL allocations — including
+	// the initial lua_State itself — use the GC64 4GB-boundary-safe scheme.
+	// Cannot use sol::state here because luaL_newstate (inside sol) uses the
+	// default allocator; installing it later via lua_setallocf would leave the
+	// initial objects (string table, global_State, etc.) with the wrong header,
+	// causing heap corruption on first realloc. solState remains empty on macOS
+	// so ScriptShutdown closes L directly via lua_close. (#8)
+	L = lua_newstate(mac_gc64_alloc, nullptr);
+	if (!L) sys->Error("Error: unable to create Lua state.");
+	sys->con->Printf("macOS: GC64 4GB-boundary allocator installed (#8)\n");
 	// luaJIT_setmode(MODE_OFF) + FLUSH breaks interpreter on arm64 GC64
 	// (function return capture hangs after FFUNC replacements fix that).
 	// Instead, call jit.off() from Lua AFTER replacing FFUNCs, to disable
 	// new trace compilation without corrupting the interpreter state. (#8)
 	sys->con->Printf("macOS arm64: JIT off deferred to after FFUNC replacement\n");
+#else
+	solState.emplace();
+	L = solState->lua_state();
+	if ( !L ) sys->Error("Error: unable to create Lua state.");
 #endif
 	lua_atpanic(L, l_panicFunc);
 	lua_pushlightuserdata(L, this);
@@ -2237,6 +2284,11 @@ void ui_main_c::ScriptShutdown()
 	ui_IDebug::FreeHandle(debug);
 
 	// Shutdown Lua
+#if __APPLE__ && __MACH__
+	// solState is empty on macOS (we bypassed sol::state to install the custom
+	// allocator via lua_newstate). Close the state directly. (#8)
+	if (L && !solState.has_value()) lua_close(L);
+#endif
 	L = NULL;
 	solState.reset();
 }
