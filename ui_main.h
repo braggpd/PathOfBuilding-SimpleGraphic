@@ -11,8 +11,8 @@
 struct ui_expectationFailed_s {};
 
 #if __APPLE__ && __MACH__
-// Custom LuaJIT allocator: shifts every user pointer by 16 bytes so no GCobj
-// can land at a 4GB-multiple address (arm64 GC64 bytecode handler bug). (#8)
+// Custom LuaJIT allocator: ensures no address in [user, user+nsize) has lower
+// 32 bits = 0, preventing 4GB-boundary crashes on arm64 GC64. (#8)
 void* mac_gc64_alloc(void* ud, void* ptr, size_t osize, size_t nsize);
 bool mac_pload_module_pcall(lua_State* L, const char* modName);
 void mac_sync_globals_from_helper_co(lua_State* L);

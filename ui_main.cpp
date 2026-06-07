@@ -14,39 +14,90 @@
 // coroutine — lua_pcall from inside a LIGHTFUNC corrupts interpreter return state. (#8)
 
 #if __APPLE__ && __MACH__
-// LuaJIT arm64 GC64: several bytecode handlers contain 32-bit loads for
-// GCobj pointers (e.g. BC_GGET). When an object sits at a 4GB-multiple
-// address (lower 32 bits = 0x0) the truncated read yields NULL, triggering
-// EXC_BAD_ACCESS at FAR=0x0. Fix: custom allocator installed via
-// lua_newstate that reserves 16 bytes before every user pointer. The
-// 1-byte offset field stored at user[-1] allows safe free/realloc. If
-// user = raw+16 would itself land on a 4GB boundary, offset 8 is used
-// instead (raw+8 can never simultaneously be at a boundary). (#8)
+// LuaJIT arm64 GC64: interior Lua stack pointers (e.g. L->base, L->top) are
+// raw 64-bit TValue* fields. If a bytecode-handler or C-helper uses a 32-bit
+// load/store for such a field and the address happens to be 4GB-aligned (lower
+// 32 bits = 0), the value is silently truncated to 0, causing a NULL dereference.
+//
+// The previous fix (v1) only guaranteed that the START address of each allocation
+// had non-zero lower-32 bits. That is insufficient: if the Lua stack straddles a
+// 4GB boundary, the frame-base pointer L->base pointing into the middle of the
+// stack can still land on a 4GB-aligned address.
+//
+// Fix (v2): guarantee that NO address in [user, user+nsize) has lower-32 = 0.
+// This means the allocation must not cross any 4GB boundary.
+//
+// Layout: [raw ... (off-4 padding bytes) ... uint32_t off ... user_data(nsize)]
+//   off: byte offset from raw to user_data; multiple of 8, minimum 8.
+//   Stored as uint32_t at user[-4]. Invariant: no 4GB boundary in [user, user+nsize). (#8)
 void* mac_gc64_alloc(void* /*ud*/, void* ptr, size_t osize, size_t nsize) {
-    // Layout: [raw ... (off-1 padding bytes) ... offset_byte ... user_data(nsize)]
-    // off = 16 normally; off = 8 when raw+16 lower-32 == 0.
     if (nsize == 0) {
         if (ptr) {
-            uint8_t off = *((uint8_t*)ptr - 1);
+            uint32_t off;
+            memcpy(&off, (char*)ptr - 4, 4);
             free((char*)ptr - off);
         }
         return nullptr;
     }
-    char* raw = nullptr;
-    uint8_t old_off = 16;
+
+    uint32_t old_off = 8u;
+    if (ptr) memcpy(&old_off, (char*)ptr - 4, 4);
+
+    // Pre-allocate enough extra space to shift the user pointer past a 4GB
+    // boundary if needed.  Maximum skip required = distance from user_ptr to
+    // next boundary ≤ nsize bytes.  Cap the extra at 512 KB to bound overhead
+    // for large allocations (strings, tables >512 KB are unlikely to straddle).
+    const size_t kSkipCap = 512u * 1024u;
+    const size_t extra = (nsize <= kSkipCap) ? (nsize + 8u) : (kSkipCap + 8u);
+    const size_t raw_size = nsize + extra;
+
+    char* raw;
     if (ptr) {
-        old_off = *((uint8_t*)ptr - 1);
-        raw = (char*)realloc((char*)ptr - old_off, nsize + 16);
+        raw = (char*)realloc((char*)ptr - old_off, raw_size);
     } else {
-        raw = (char*)malloc(nsize + 16);
+        raw = (char*)malloc(raw_size);
     }
     if (!raw) return nullptr;
-    uint8_t new_off = (((uintptr_t)(raw + 16)) & 0xFFFFFFFFu) == 0u ? 8u : 16u;
-    if (ptr && new_off != old_off) {
-        size_t copy = nsize < osize ? nsize : osize;
-        memmove(raw + new_off, raw + old_off, copy);
+
+    // Find smallest valid offset (multiple of 8, >= 8) such that:
+    //   (a) lower-32 bits of (raw + off) != 0
+    //   (b) no 4GB boundary inside [raw+off, raw+off+nsize)
+    uint32_t new_off = 8u;
+    for (;;) {
+        if ((size_t)new_off + nsize > raw_size) {
+            new_off = 8u; // exhausted space; best-effort fallback
+            break;
+        }
+        const uintptr_t user = (uintptr_t)(raw + new_off);
+        // (a) start must not be at a 4GB boundary
+        if ((user & 0xFFFFFFFFu) == 0u) {
+            new_off += 8u;
+            continue;
+        }
+        // (b) allocation must not cross a 4GB boundary
+        if (nsize > 1u) {
+            const uintptr_t last = user + nsize - 1u;
+            if ((last >> 32) != (user >> 32)) {
+                // Compute offset to land 8+ bytes past the next 4GB boundary
+                const uintptr_t next_bound = ((user >> 32) + 1u) << 32;
+                const uintptr_t skip = next_bound - (uintptr_t)raw + 8u;
+                const uint32_t candidate = (uint32_t)((skip + 7u) & ~(uintptr_t)7u);
+                if ((size_t)candidate + nsize <= raw_size) {
+                    new_off = candidate;
+                    continue; // re-check the new position
+                }
+                // Not enough pre-allocated space to skip; use best-effort offset
+                break;
+            }
+        }
+        break; // valid offset found
     }
-    *((uint8_t*)(raw + new_off) - 1) = new_off;
+
+    if (ptr && new_off != old_off) {
+        const size_t copy_size = (nsize < osize) ? nsize : osize;
+        memmove(raw + new_off, raw + old_off, copy_size);
+    }
+    memcpy(raw + new_off - 4u, &new_off, 4u);
     return raw + new_off;
 }
 
@@ -1696,7 +1747,7 @@ void ui_main_c::ScriptInit()
 	// so ScriptShutdown closes L directly via lua_close. (#8)
 	L = lua_newstate(mac_gc64_alloc, nullptr);
 	if (!L) sys->Error("Error: unable to create Lua state.");
-	sys->con->Printf("macOS: GC64 4GB-boundary allocator installed (#8)\n");
+	sys->con->Printf("macOS: GC64 interior-pointer-safe allocator v2 installed (#8)\n");
 	// luaJIT_setmode(MODE_OFF) + FLUSH breaks interpreter on arm64 GC64
 	// (function return capture hangs after FFUNC replacements fix that).
 	// Instead, call jit.off() from Lua AFTER replacing FFUNCs, to disable
