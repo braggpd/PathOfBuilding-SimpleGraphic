@@ -730,7 +730,11 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
             status = LUA_ERRRUN;
             break;
         }
+        // Stop GC during module execution: arm64 GC64 GC traversal can fire
+        // finalizers that hit broken code paths (e.g. LJLIB_ASM via cdata). (#8)
+        lua_gc(L, LUA_GCSTOP, 0);
         const int callErr = lua_pcall(L, 0, 0, 0);
+        lua_gc(L, LUA_GCRESTART, -1);
         if (callErr != LUA_OK) {
             const char* callErrMsg = lua_tostring(L, -1);
             ui->sys->con->Printf("macOS: PLoad module error: %s\n", callErrMsg ? callErrMsg : "?");
