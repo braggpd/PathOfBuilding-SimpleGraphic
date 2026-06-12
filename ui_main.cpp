@@ -101,6 +101,258 @@ void* mac_gc64_alloc(void* /*ud*/, void* ptr, size_t osize, size_t nsize) {
     return raw + new_off;
 }
 
+static int s_macGcStopDepth = 0;
+
+void mac_gc64_stop_gc(lua_State* L)
+{
+	if (s_macGcStopDepth == 0) {
+		lua_gc(L, LUA_GCSTOP, 0);
+	}
+	s_macGcStopDepth++;
+}
+
+void mac_gc64_restart_gc(lua_State* L)
+{
+	if (s_macGcStopDepth <= 0) {
+		return;
+	}
+	s_macGcStopDepth--;
+	if (s_macGcStopDepth == 0) {
+		lua_gc(L, LUA_GCRESTART, -1);
+	}
+}
+
+// GC64-safe bit ops: stash numeric results for Lua wrappers (NOT64/AND64 in Global.lua). (#8)
+static int l_mac_bit_bnot_c(lua_State* L)
+{
+	const uint32_t v = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+	lua_pushnumber(L, (int32_t)(~v));
+	lua_setglobal(L, "__mac_api_result");
+	return 0;
+}
+
+static int l_mac_bit_band_c(lua_State* L)
+{
+	uint32_t r = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+	for (int i = 2, n = lua_gettop(L); i <= n; i++) {
+		r &= (uint32_t)(int32_t)luaL_checknumber(L, i);
+	}
+	lua_pushnumber(L, (int32_t)r);
+	lua_setglobal(L, "__mac_api_result");
+	return 0;
+}
+
+static int l_mac_bit_bxor_c(lua_State* L)
+{
+	uint32_t r = (uint32_t)(int32_t)luaL_checknumber(L, 1);
+	for (int i = 2, n = lua_gettop(L); i <= n; i++) {
+		r ^= (uint32_t)(int32_t)luaL_checknumber(L, i);
+	}
+	lua_pushnumber(L, (int32_t)r);
+	lua_setglobal(L, "__mac_api_result");
+	return 0;
+}
+
+// PoB Global.lua 64-bit helpers: Lua versions use local/arg division by 2^32 which
+// SIGSEGV on arm64 GC64. Pure C + stash wrappers replace the Lua definitions. (#8)
+static constexpr uint32_t kMacHighMask53 = 0x1FFFFFu;
+
+static void mac_split64(double a, uint32_t* hi, uint32_t* lo)
+{
+	const uint64_t u = (uint64_t)(a >= 0 ? a : 0);
+	*hi = (uint32_t)(u >> 32);
+	*lo = (uint32_t)u;
+}
+
+static double mac_combine64(uint32_t hi, uint32_t lo)
+{
+	const uint64_t r = ((uint64_t)(hi & kMacHighMask53) << 32) | (uint64_t)lo;
+	return (double)r;
+}
+
+static void mac_stash_api_number(lua_State* L, double v)
+{
+	lua_pushnumber(L, v);
+	lua_setglobal(L, "__mac_api_result");
+}
+
+static int l_mac_not64_c(lua_State* L)
+{
+	uint32_t hi = 0;
+	uint32_t lo = 0;
+	mac_split64(luaL_checknumber(L, 1), &hi, &lo);
+	mac_stash_api_number(L, mac_combine64(~hi, ~lo));
+	return 0;
+}
+
+static int l_mac_or64_c(lua_State* L)
+{
+	const int n = lua_gettop(L);
+	if (n <= 0) {
+		mac_stash_api_number(L, 0);
+		return 0;
+	}
+	double result = luaL_checknumber(L, 1);
+	for (int i = 2; i <= n; i++) {
+		uint32_t rh = 0;
+		uint32_t rl = 0;
+		uint32_t oh = 0;
+		uint32_t ol = 0;
+		mac_split64(result, &rh, &rl);
+		mac_split64(luaL_checknumber(L, i), &oh, &ol);
+		result = mac_combine64(rh | oh, rl | ol);
+	}
+	mac_stash_api_number(L, result);
+	return 0;
+}
+
+static int l_mac_and64_c(lua_State* L)
+{
+	const int n = lua_gettop(L);
+	if (n <= 0) {
+		mac_stash_api_number(L, 0);
+		return 0;
+	}
+	double result = luaL_checknumber(L, 1);
+	for (int i = 2; i <= n; i++) {
+		uint32_t rh = 0;
+		uint32_t rl = 0;
+		uint32_t oh = 0;
+		uint32_t ol = 0;
+		mac_split64(result, &rh, &rl);
+		mac_split64(luaL_checknumber(L, i), &oh, &ol);
+		result = mac_combine64(rh & oh, rl & ol);
+	}
+	mac_stash_api_number(L, result);
+	return 0;
+}
+
+static int l_mac_xor64_c(lua_State* L)
+{
+	const int n = lua_gettop(L);
+	if (n <= 0) {
+		mac_stash_api_number(L, 0);
+		return 0;
+	}
+	double result = luaL_checknumber(L, 1);
+	for (int i = 2; i <= n; i++) {
+		uint32_t rh = 0;
+		uint32_t rl = 0;
+		uint32_t oh = 0;
+		uint32_t ol = 0;
+		mac_split64(result, &rh, &rl);
+		mac_split64(luaL_checknumber(L, i), &oh, &ol);
+		result = mac_combine64(rh ^ oh, rl ^ ol);
+	}
+	mac_stash_api_number(L, result);
+	return 0;
+}
+
+// Global.lua SkillTypeName reverse lookup: pairs() loop SIGSEGV on arm64 GC64. (#8)
+static int l_mac_build_skilltype_name_c(lua_State* L)
+{
+	lua_getglobal(L, "SkillType");
+	if (!lua_istable(L, -1)) {
+		return luaL_error(L, "SkillType table missing");
+	}
+	lua_newtable(L);
+	lua_pushnil(L);
+	while (lua_next(L, -3) != 0) {
+		lua_pushvalue(L, -1);
+		lua_pushvalue(L, -3);
+		lua_rawset(L, -5);
+		lua_pop(L, 1);
+	}
+	lua_setglobal(L, "SkillTypeName");
+	return 0;
+}
+
+// Misc.lua hollowPalmAddedPhys: nested [n]={a,b} literals hang GC64 interpreter. (#8)
+static const struct {
+	int a;
+	int b;
+} kMacHollowPalmAddedPhys[] = {
+    {11, 17},   {18, 27},   {27, 41},   {37, 55},   {47, 70},   {57, 86},   {67, 100},  {78, 117},
+    {88, 132},  {99, 148},  {109, 164}, {114, 171}, {118, 177}, {128, 192}, {138, 207}, {146, 219},
+    {155, 233}, {164, 245}, {172, 258}, {180, 270}, {187, 281}, {194, 291}, {200, 300}, {207, 310},
+    {213, 320}, {219, 329}, {226, 339}, {232, 348}, {239, 358}, {245, 367}, {251, 377}, {258, 387},
+    {264, 396}, {270, 405}, {276, 415}, {283, 424}, {289, 434}, {295, 443}, {302, 452}, {308, 462},
+};
+
+static int l_mac_fill_hollow_palm_added_phys_c(lua_State* L)
+{
+	if (!lua_istable(L, 1)) {
+		return luaL_error(L, "__mac_fill_hollow_palm_added_phys_c: expected data table");
+	}
+	lua_newtable(L);
+	for (size_t i = 0; i < sizeof(kMacHollowPalmAddedPhys) / sizeof(kMacHollowPalmAddedPhys[0]); i++) {
+		lua_pushnumber(L, (lua_Number)(i + 1));
+		lua_createtable(L, 2, 0);
+		lua_pushnumber(L, 1);
+		lua_pushinteger(L, kMacHollowPalmAddedPhys[i].a);
+		lua_rawset(L, -3);
+		lua_pushnumber(L, 2);
+		lua_pushinteger(L, kMacHollowPalmAddedPhys[i].b);
+		lua_rawset(L, -3);
+		lua_rawset(L, -3);
+	}
+	lua_setfield(L, 1, "hollowPalmAddedPhys");
+	return 0;
+}
+
+void mac_misc_hollow_palm_fill_if_needed(lua_State* L)
+{
+	lua_getglobal(L, "__mac_misc_data_for_hollow_palm");
+	if (!lua_istable(L, -1)) {
+		lua_settop(L, 0);
+		return;
+	}
+	lua_insert(L, 1); // data at 1
+	l_mac_fill_hollow_palm_added_phys_c(L);
+	lua_pushnil(L);
+	lua_setglobal(L, "__mac_misc_data_for_hollow_palm");
+	lua_settop(L, 0);
+}
+
+static ui_main_c* mac_get_ui(lua_State* L);
+
+static int l_mac_pload_misc_c(lua_State* L)
+{
+	ui_main_c* ui = mac_get_ui(L);
+	if (!ui) {
+		return luaL_error(L, "__mac_pload_misc_c: no ui context");
+	}
+	const char* modName = luaL_checkstring(L, 1);
+	luaL_checktype(L, 2, LUA_TTABLE);
+	auto fileName = std::filesystem::u8path(modName);
+	if (!fileName.has_extension()) {
+		fileName.replace_extension(".lua");
+	}
+	const auto filePath = (ui->scriptPath / fileName).lexically_normal();
+	ui->sys->SetWorkDir(ui->scriptPath);
+	const int loadErr = mac_lua_load_module_file(L, ui, filePath, modName);
+	ui->sys->SetWorkDir(ui->scriptWorkDir);
+	if (loadErr != LUA_OK) {
+		return luaL_error(L, "LoadModule() error loading '%s': %s", modName,
+		                  lua_tostring(L, -1));
+	}
+	lua_pushvalue(L, 2);
+	mac_set_in_pload(false);
+	lua_pushboolean(L, 0);
+	lua_setglobal(L, "__mac_in_pload_flag");
+	const char* runErrMsg = nullptr;
+	const bool ok = mac_run_module_chunk_fresh_co(L, lua_gettop(L) - 1, 1, &runErrMsg);
+	mac_set_in_pload(true);
+	lua_pushboolean(L, 1);
+	lua_setglobal(L, "__mac_in_pload_flag");
+	if (!ok) {
+		return luaL_error(L, "LoadModule() error running '%s': %s", modName,
+		                  runErrMsg ? runErrMsg : "unknown error");
+	}
+	mac_misc_hollow_palm_fill_if_needed(L);
+	return 0;
+}
+
 // Copy launch from helper thread into uicallbacks.MainObject (SetMainObject from co is unreliable). (#8)
 static void mac_sync_main_object_from_co(lua_State* L, lua_State* co) {
 	lua_getglobal(co, "launch");
@@ -604,6 +856,7 @@ static void mac_replace_broken_ffuncs(lua_State* L, sys_IMain* sys) {
 
 static int s_macHelperCoRef = LUA_NOREF;
 static bool s_macInPload = false;
+static bool s_macPloadMiscDefer = false;
 static bool s_macServicingPloadQueue = false;
 bool mac_is_in_pload() { return s_macInPload; }
 void mac_set_in_pload(bool in_pload) { s_macInPload = in_pload; }
@@ -614,6 +867,376 @@ static ui_main_c* mac_get_ui(lua_State* L) {
     ui_main_c* ui = (ui_main_c*)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return ui;
+}
+
+// Only Global.lua needs GC held during chunk run (NOT64 / arm64 GC64). Nested Misc
+// from Data.lua must run with GC enabled — huge table literals spin at 100% CPU. (#8)
+static bool mac_pload_module_needs_gc_hold(const char* modName)
+{
+	return modName && std::strstr(modName, "Global") != nullptr;
+}
+
+static lua_State* mac_pload_get_helper_co(lua_State* L)
+{
+	if (s_macHelperCoRef == LUA_NOREF) {
+		return nullptr;
+	}
+	lua_rawgeti(L, LUA_REGISTRYINDEX, s_macHelperCoRef);
+	if (!lua_isthread(L, -1)) {
+		lua_pop(L, 1);
+		return nullptr;
+	}
+	lua_State* co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	return co;
+}
+
+bool mac_pload_run_deferred_misc(lua_State* L, ui_main_c* ui)
+{
+	lua_State* co = mac_pload_get_helper_co(L);
+	if (!co) {
+		ui->sys->con->Printf("macOS: PLoad deferred Misc: no helper co\n");
+		return false;
+	}
+	lua_getglobal(co, "data");
+	if (!lua_istable(co, -1)) {
+		lua_pop(co, 1);
+		ui->sys->con->Printf("macOS: PLoad deferred Misc: co.data missing\n");
+		return false;
+	}
+	lua_xmove(co, L, 1);
+	const int savedCoRef = s_macHelperCoRef;
+	s_macHelperCoRef = LUA_NOREF;
+	mac_set_in_pload(false);
+	lua_pushboolean(L, 0);
+	lua_setglobal(L, "__mac_in_pload_flag");
+	lua_getglobal(L, "__mac_loadmodule_c");
+	lua_pushstring(L, "Data/Misc");
+	lua_pushvalue(L, 1);
+	const int t0 = ui->sys->GetTime();
+	const int runErr = lua_pcall(L, 2, 0, 0);
+	const int t1 = ui->sys->GetTime();
+	lua_settop(L, 0);
+	s_macHelperCoRef = savedCoRef;
+	mac_set_in_pload(true);
+	lua_pushboolean(L, 1);
+	lua_setglobal(L, "__mac_in_pload_flag");
+	if (runErr != LUA_OK) {
+		const char* errMsg = lua_tostring(L, -1);
+		ui->sys->con->Printf("macOS: PLoad deferred Misc failed: %s\n", errMsg ? errMsg : "?");
+		lua_settop(L, 0);
+		return false;
+	}
+	lua_getglobal(co, "data");
+	if (lua_istable(co, -1)) {
+		lua_getfield(co, -1, "characterConstants");
+		ui->sys->con->Printf("macOS: PLoad deferred Misc OK (%dms) characterConstants=%s\n",
+		                     t1 - t0, luaL_typename(co, -1));
+		lua_pop(co, 2);
+	} else {
+		lua_pop(co, 1);
+	}
+	return true;
+}
+
+static void mac_copy_co_global(lua_State* root, lua_State* co, const char* key)
+{
+	lua_getglobal(co, key);
+	if (!lua_isnil(co, -1)) {
+		lua_pushvalue(co, -1);
+		lua_setglobal(root, key);
+	}
+	lua_pop(co, 1);
+}
+
+void mac_sync_co_globals_to_root(lua_State* root, lua_State* co)
+{
+	// Full _G copy SIGSEGVs on GC64; copy only globals Data.lua tail needs from Global/GameVersions.
+	static const char* const kKeys[] = { "SkillType",     "SkillTypeName", "colorCodes",
+		                                     "KeywordFlag", "ModFlag",       "latestTreeVersion",
+		                                     "treeVersions", "treeVersionList", nullptr };
+	for (int i = 0; kKeys[i]; i++) {
+		mac_copy_co_global(root, co, kKeys[i]);
+	}
+}
+
+static bool mac_pload_root_loadmodule(lua_State* root, const char* modName, int dataArgIdx,
+                                      ui_main_c* ui, const char* label)
+{
+	lua_getglobal(root, "__mac_loadmodule_c");
+	lua_pushstring(root, modName);
+	if (dataArgIdx > 0) {
+		lua_pushvalue(root, dataArgIdx);
+	}
+	const int nargs = dataArgIdx > 0 ? 2 : 1;
+	const int t0 = ui->sys->GetTime();
+	const int runErr = lua_pcall(root, nargs, 0, 0);
+	const int t1 = ui->sys->GetTime();
+	if (runErr != LUA_OK) {
+		ui->sys->con->Printf("macOS: PLoad %s failed: %s\n", label,
+		                     lua_tostring(root, -1) ? lua_tostring(root, -1) : "?");
+		return false;
+	}
+	ui->sys->con->Printf("macOS: PLoad %s OK (%dms)\n", label, t1 - t0);
+	return true;
+}
+
+static int l_mac_pload_data_after_misc_c(lua_State* L)
+{
+	ui_main_c* ui = mac_get_ui(L);
+	if (!ui || !ui->L) {
+		return luaL_error(L, "__mac_pload_data_after_misc_c: no ui context");
+	}
+	luaL_checktype(L, 1, LUA_TTABLE);
+	lua_State* root = ui->L;
+	lua_State* co = mac_pload_get_helper_co(root);
+	if (!co) {
+		return luaL_error(L, "__mac_pload_data_after_misc_c: no PLoad coroutine");
+	}
+	lua_pushvalue(L, 1);
+	lua_xmove(L, root, 1);
+	const int savedCoRef = s_macHelperCoRef;
+	s_macHelperCoRef = LUA_NOREF;
+	mac_set_in_pload(false);
+	lua_pushboolean(root, 0);
+	lua_setglobal(root, "__mac_in_pload_flag");
+	if (!mac_pload_root_loadmodule(root, "Data/Misc", 1, ui, "Data/Misc inline")) {
+		lua_settop(root, 0);
+		s_macHelperCoRef = savedCoRef;
+		mac_set_in_pload(true);
+		lua_pushboolean(root, 1);
+		lua_setglobal(root, "__mac_in_pload_flag");
+		return luaL_error(L, "PLoad Data/Misc failed");
+	}
+	mac_sync_co_globals_to_root(root, co);
+	int tailEndLine = 100000;
+	if (const char* env = std::getenv("POB_MAC_BISECT_DATA_END")) {
+		tailEndLine = std::atoi(env);
+	}
+	const std::string buf = mac_build_pload_data_tail_chunk(ui, tailEndLine);
+	const auto filePath = (ui->scriptPath / "Modules/Data.lua").lexically_normal();
+	ui->sys->SetWorkDir(ui->scriptPath);
+	const int loadErr =
+	    luaL_loadbuffer(root, buf.c_str(), buf.size(), filePath.generic_u8string().c_str());
+	ui->sys->SetWorkDir(ui->scriptWorkDir);
+	if (loadErr != LUA_OK) {
+		const char* loadMsg = lua_tostring(root, -1);
+		lua_settop(root, 0);
+		s_macHelperCoRef = savedCoRef;
+		mac_set_in_pload(true);
+		lua_pushboolean(root, 1);
+		lua_setglobal(root, "__mac_in_pload_flag");
+		if (mac_bisect_data_misc_enabled()) {
+			ui->sys->con->Printf("macOS BISECT: data.misc tail load error (lines 171-%d): %s\n",
+			                     tailEndLine, loadMsg ? loadMsg : "?");
+			std::exit(1);
+		}
+		return luaL_error(L, "PLoad Data.lua tail load error: %s", loadMsg ? loadMsg : "?");
+	}
+	lua_pushvalue(root, 1);
+	const int t0 = ui->sys->GetTime();
+	const int runErr = lua_pcall(root, 1, 0, 0);
+	const int t1 = ui->sys->GetTime();
+	if (runErr != LUA_OK) {
+		const char* errMsg = lua_tostring(root, -1);
+		lua_settop(root, 0);
+		s_macHelperCoRef = savedCoRef;
+		mac_set_in_pload(true);
+		lua_pushboolean(root, 1);
+		lua_setglobal(root, "__mac_in_pload_flag");
+		if (mac_bisect_data_misc_enabled()) {
+			ui->sys->con->Printf("macOS BISECT: data.misc tail FAILED (lines 171-%d): %s\n",
+			                     tailEndLine, errMsg ? errMsg : "?");
+			std::exit(1);
+		}
+		return luaL_error(L, "PLoad Data.lua tail error: %s", errMsg ? errMsg : "?");
+	}
+	lua_settop(root, 0);
+	s_macHelperCoRef = savedCoRef;
+	mac_set_in_pload(true);
+	lua_pushboolean(root, 1);
+	lua_setglobal(root, "__mac_in_pload_flag");
+	ui->sys->con->Printf("macOS: PLoad Data.lua tail OK (%dms)\n", t1 - t0);
+	if (mac_bisect_data_misc_enabled()) {
+		ui->sys->con->Printf("macOS BISECT: data.misc tail OK (lines 171-%d, %dms)\n", tailEndLine,
+		                     t1 - t0);
+		std::exit(0);
+	}
+	return 0;
+}
+
+static int l_mac_pload_misc_now_c(lua_State* L)
+{
+	ui_main_c* ui = mac_get_ui(L);
+	if (!ui || !ui->L) {
+		return luaL_error(L, "__mac_pload_misc_now_c: no ui context");
+	}
+	luaL_checktype(L, 1, LUA_TTABLE);
+	lua_State* root = ui->L;
+	lua_pushvalue(L, 1);
+	lua_xmove(L, root, 1);
+	const int savedCoRef = s_macHelperCoRef;
+	s_macHelperCoRef = LUA_NOREF;
+	mac_set_in_pload(false);
+	lua_pushboolean(root, 0);
+	lua_setglobal(root, "__mac_in_pload_flag");
+	lua_getglobal(root, "__mac_loadmodule_c");
+	lua_pushstring(root, "Data/Misc");
+	lua_pushvalue(root, 1);
+	const int t0 = ui->sys->GetTime();
+	const int runErr = lua_pcall(root, 2, 0, 0);
+	const int t1 = ui->sys->GetTime();
+	if (runErr != LUA_OK) {
+		const char* errMsg = lua_tostring(root, -1);
+		lua_settop(root, 0);
+		s_macHelperCoRef = savedCoRef;
+		mac_set_in_pload(true);
+		lua_pushboolean(root, 1);
+		lua_setglobal(root, "__mac_in_pload_flag");
+		return luaL_error(L, "LoadModule() error running Data/Misc: %s", errMsg ? errMsg : "?");
+	}
+	lua_settop(root, 0);
+	s_macHelperCoRef = savedCoRef;
+	mac_set_in_pload(true);
+	lua_pushboolean(root, 1);
+	lua_setglobal(root, "__mac_in_pload_flag");
+	ui->sys->con->Printf("macOS: PLoad Data/Misc inline OK (%dms)\n", t1 - t0);
+	lua_getfield(L, 1, "characterConstants");
+	ui->sys->con->Printf("macOS: PLoad Data/Misc inline co.data.characterConstants=%s\n",
+	                     luaL_typename(L, -1));
+	lua_pop(L, 1);
+	return 0;
+}
+
+static constexpr int kMacPloadMiscDefer = MAC_PLOAD_MISC_DEFER;
+
+static int mac_pload_yield_loop(lua_State* L, lua_State* co, int status)
+{
+    while (status == LUA_YIELD) {
+        if (ui_main_c* ui = mac_get_ui(L)) {
+            ui->sys->con->Printf("macOS: PLoad yield handler coTop=%d\n", lua_gettop(co));
+        }
+        const int n = lua_gettop(co);
+        if (n != 1 || !lua_istable(co, 1)) {
+            lua_pushliteral(co, "unexpected yield in PLoadModule coroutine");
+            status = LUA_ERRRUN;
+            break;
+        }
+        lua_getfield(co, 1, "tag");
+        const bool isLoadModuleYield = lua_isstring(co, -1) &&
+            strcmp(lua_tostring(co, -1), "__mac_lm") == 0;
+        lua_pop(co, 1);
+        if (!isLoadModuleYield) {
+            lua_pushliteral(co, "unexpected yield in PLoadModule coroutine");
+            status = LUA_ERRRUN;
+            break;
+        }
+        lua_getfield(co, 1, "nested");
+        const bool nestedLoad = lua_toboolean(co, -1);
+        lua_pop(co, 1);
+        lua_getfield(co, 1, "a1");
+        const char* modName = lua_isstring(co, -1) ? lua_tostring(co, -1) : nullptr;
+        if (!modName) {
+            lua_pop(co, 1);
+            lua_pushliteral(co, "PLoadModule: missing module name in yield");
+            status = LUA_ERRRUN;
+            break;
+        }
+        ui_main_c* ui = mac_get_ui(L);
+        if (!ui) {
+            lua_pop(co, 1);
+            lua_pushliteral(co, "PLoadModule: no ui context");
+            status = LUA_ERRRUN;
+            break;
+        }
+        const int tStartMs = ui->sys->GetTime();
+        const bool gcHold = nestedLoad && mac_pload_module_needs_gc_hold(modName);
+        const bool isMiscMod = mac_module_is_misc(modName);
+        ui->sys->con->Printf("macOS: PLoad servicing LoadModule %s (nested=%d gcHold=%d misc=%d)\n",
+                             modName, nestedLoad ? 1 : 0, gcHold ? 1 : 0, isMiscMod ? 1 : 0);
+        if (mac_try_bisect_global_module(L, ui, modName)) {
+            continue;
+        }
+        if (mac_try_bisect_misc_module(L, ui, modName)) {
+            continue;
+        }
+        lua_pop(co, 1); // drop a1
+        lua_pop(co, 1); // drop yield table
+        if (!gcHold) {
+            mac_gc64_restart_gc(L);
+        }
+        auto fileName = std::filesystem::u8path(modName);
+        if (!fileName.has_extension()) fileName.replace_extension(".lua");
+        auto filePath = (ui->scriptPath / fileName).lexically_normal();
+        lua_settop(L, 0);
+        ui->sys->SetWorkDir(ui->scriptPath);
+        const int loadErr = mac_lua_load_module_file(L, ui, filePath, modName);
+        ui->sys->SetWorkDir(ui->scriptWorkDir);
+        if (loadErr != LUA_OK) {
+            const char* loadErrMsg = lua_tostring(L, -1);
+            ui->sys->con->Printf("macOS: PLoad load error: %s\n", loadErrMsg ? loadErrMsg : "?");
+            lua_pop(L, 1);
+            if (loadErrMsg) lua_pushstring(co, loadErrMsg);
+            else lua_pushliteral(co, "PLoadModule: file load failed");
+            status = LUA_ERRRUN;
+            break;
+        }
+        const int tLoadedMs = ui->sys->GetTime();
+        if (gcHold) {
+            mac_gc64_stop_gc(L);
+        }
+        lua_xmove(L, co, 1);
+        lua_settop(L, 0);
+        status = lua_resume(co, nullptr, 1);
+        const int tDoneMs = ui->sys->GetTime();
+        ui->sys->con->Printf(
+            "macOS: PLoad resume status=%d coTop=%d (serviced %s, load=%dms run=%dms nested=%d gcHold=%d)\n",
+            status, lua_gettop(co), modName, tLoadedMs - tStartMs, tDoneMs - tLoadedMs,
+            nestedLoad ? 1 : 0, gcHold ? 1 : 0);
+    }
+    return status;
+}
+
+static int l_mac_misc_noop_chunk(lua_State* L)
+{
+	return 0;
+}
+
+int mac_pload_coroutine_continue(lua_State* L)
+{
+    lua_State* co = mac_pload_get_helper_co(L);
+    if (!co) {
+        lua_pushboolean(L, 0);
+        lua_pushliteral(L, "PLoadModule: no helper coroutine");
+        return 2;
+    }
+    lua_pushcfunction(L, l_mac_misc_noop_chunk);
+    lua_xmove(L, co, 1);
+    int status = lua_resume(co, L, 1);
+    status = mac_pload_yield_loop(L, co, status);
+    if (status == kMacPloadMiscDefer) {
+        return kMacPloadMiscDefer;
+    }
+    s_macInPload = false;
+    mac_gc64_restart_gc(L);
+    lua_pushboolean(L, 0);
+    lua_setglobal(L, "__mac_in_pload_flag");
+    lua_pushinteger(L, 0);
+    lua_setglobal(L, "__mac_module_depth");
+    if (status == 0) {
+        if (ui_main_c* ui = mac_get_ui(L)) {
+            ui->sys->con->Printf("macOS: PLoad coroutine finished OK (coTop=%d)\n", lua_gettop(co));
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushboolean(L, 0);
+    if (lua_gettop(co) > 0 && lua_isstring(co, -1)) {
+        lua_pushstring(L, lua_tostring(co, -1));
+    } else {
+        lua_pushliteral(L, "PLoadModule: unknown error");
+    }
+    return 2;
 }
 
 void mac_sync_globals_from_helper_co(lua_State* L)
@@ -661,6 +1284,8 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
     lua_settop(L, 0);
 
     s_macInPload = true;
+    lua_pushinteger(L, 0);
+    lua_setglobal(L, "__mac_module_depth");
     lua_pushboolean(L, 1);
     lua_setglobal(L, "__mac_in_pload_flag");
     int status = lua_resume(co, nullptr, extraArgs);
@@ -668,93 +1293,13 @@ int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc co
         ui->sys->con->Printf("macOS: PLoad initial resume status=%d (YIELD=%d) coTop=%d\n",
             status, LUA_YIELD, lua_gettop(co));
     }
-    while (status == LUA_YIELD) {
-        if (ui_main_c* ui = mac_get_ui(L)) {
-            ui->sys->con->Printf("macOS: PLoad yield handler coTop=%d\n", lua_gettop(co));
-        }
-        const int n = lua_gettop(co);
-        if (n != 1 || !lua_istable(co, 1)) {
-            lua_pushliteral(co, "unexpected yield in PLoadModule coroutine");
-            status = LUA_ERRRUN;
-            break;
-        }
-        lua_getfield(co, 1, "tag");
-        const bool isLoadModuleYield = lua_isstring(co, -1) &&
-            strcmp(lua_tostring(co, -1), "__mac_lm") == 0;
-        lua_pop(co, 1);
-        if (!isLoadModuleYield) {
-            lua_pushliteral(co, "unexpected yield in PLoadModule coroutine");
-            status = LUA_ERRRUN;
-            break;
-        }
-        // Load the file on root L and pass the compiled chunk to co as the return
-        // value of __mac_lm_yield_c. The Lua wrapper calls chunk(...) directly inside
-        // co, so nested LoadModule calls (e.g. Data.lua → Data/Global) also yield
-        // and are handled by this same loop — no nested l_LoadModule on root. (#8)
-        lua_getfield(co, 1, "a1");
-        const char* modName = lua_isstring(co, -1) ? lua_tostring(co, -1) : nullptr;
-        if (!modName) {
-            lua_pop(co, 1); // drop nil a1
-            lua_pushliteral(co, "PLoadModule: missing module name in yield");
-            status = LUA_ERRRUN;
-            break;
-        }
-        ui_main_c* ui = mac_get_ui(L);
-        if (!ui) {
-            lua_pop(co, 1);
-            lua_pushliteral(co, "PLoadModule: no ui context");
-            status = LUA_ERRRUN;
-            break;
-        }
-        ui->sys->con->Printf("macOS: PLoad servicing LoadModule %s\n", modName);
-        auto fileName = std::filesystem::u8path(modName);
-        if (!fileName.has_extension()) fileName.replace_extension(".lua");
-        auto filePath = (ui->scriptPath / fileName).lexically_normal();
-        auto fileStr = filePath.generic_u8string();
-        lua_pop(co, 1); // drop a1
-        lua_pop(co, 1); // drop yield table (co stack now empty)
-        // Run module on root L (not co): nested LoadModule calls inside modules
-        // use lua_pcall on root L — safe at any depth. Disable yield mode so
-        // those nested calls take the direct __mac_loadmodule_c path. (#8)
-        lua_pushboolean(L, 0);
-        lua_setglobal(L, "__mac_in_pload_flag");
-        ui->sys->SetWorkDir(ui->scriptPath);
-        const int loadErr = luaL_loadfile(L, fileStr.c_str());
-        ui->sys->SetWorkDir(ui->scriptWorkDir);
-        if (loadErr != LUA_OK) {
-            const char* loadErrMsg = lua_tostring(L, -1);
-            ui->sys->con->Printf("macOS: PLoad load error: %s\n", loadErrMsg ? loadErrMsg : "?");
-            lua_pop(L, 1);
-            if (loadErrMsg) lua_pushstring(co, loadErrMsg);
-            else lua_pushliteral(co, "PLoadModule: file load failed");
-            status = LUA_ERRRUN;
-            break;
-        }
-        // Stop GC during module execution: arm64 GC64 GC traversal can fire
-        // finalizers that hit broken code paths (e.g. LJLIB_ASM via cdata). (#8)
-        lua_gc(L, LUA_GCSTOP, 0);
-        const int callErr = lua_pcall(L, 0, 0, 0);
-        lua_gc(L, LUA_GCRESTART, -1);
-        if (callErr != LUA_OK) {
-            const char* callErrMsg = lua_tostring(L, -1);
-            ui->sys->con->Printf("macOS: PLoad module error: %s\n", callErrMsg ? callErrMsg : "?");
-            lua_pop(L, 1);
-            if (callErrMsg) lua_pushstring(co, callErrMsg);
-            else lua_pushliteral(co, "PLoadModule: module execution failed");
-            status = LUA_ERRRUN;
-            break;
-        }
-        // Module populated globals on L (shared with co). Resume co with 0 values;
-        // wrapLoadModule yields with no return — modules are called for side effects. (#8)
-        lua_pushboolean(L, 1);
-        lua_setglobal(L, "__mac_in_pload_flag");
-        status = lua_resume(co, nullptr, 0);
-        ui->sys->con->Printf("macOS: PLoad resume status=%d coTop=%d\n",
-            status, lua_gettop(co));
-    }
+    status = mac_pload_yield_loop(L, co, status);
     s_macInPload = false;
+    mac_gc64_restart_gc(L);
     lua_pushboolean(L, 0);
     lua_setglobal(L, "__mac_in_pload_flag");
+    lua_pushinteger(L, 0);
+    lua_setglobal(L, "__mac_module_depth");
     if (status == 0) {
         if (ui_main_c* ui = mac_get_ui(L)) {
             ui->sys->con->Printf("macOS: PLoad coroutine finished OK (coTop=%d)\n", lua_gettop(co));
@@ -1908,81 +2453,7 @@ void ui_main_c::ScriptInit()
 		lua_pop(L, 1);
 	}
 
-	// Re-return C API results from Lua functions (bytecode cannot capture C returns on arm64 GC64). (#8)
-	static char const* const kMacReturnApiWraps =
-	    "do\n"
-	    "  local function wrap1(c, g, stash)\n"
-	    "    _G[c] = _G[g]\n"
-	    "    _G[g] = function(...)\n"
-	    "      _G[c](...)\n"
-	    "      local r = _G[stash]\n"
-	    "      _G[stash] = nil\n"
-	    "      return r\n"
-	    "    end\n"
-	    "  end\n"
-	    "  local function wrap2(c, g, stash)\n"
-	    "    _G[c] = _G[g]\n"
-	    "    _G[g] = function(...)\n"
-	    "      _G[c](...)\n"
-	    "      local r = _G[stash]\n"
-	    "      _G[stash] = nil\n"
-	    "      return r[1], r[2]\n"
-	    "    end\n"
-	    "  end\n"
-	    "  local function wrapPCall(c, g, stash)\n"
-	    "    _G[c] = _G[g]\n"
-	    "    _G[g] = function(...)\n"
-	    "      _G[c](...)\n"
-	    "      local r = _G[stash]\n"
-	    "      _G[stash] = nil\n"
-	    "      return r[1], r[2], r[3], r[4], r[5]\n"
-	    "    end\n"
-	    "  end\n"
-	    "  wrap1('__mac_gettime_c', 'GetTime', '__mac_api_result')\n"
-	    "  wrap2('__mac_getscreensize_c', 'GetScreenSize', '__mac_api_result')\n"
-	    "  wrap1('__mac_getscreenscale_c', 'GetScreenScale', '__mac_api_result')\n"
-	    "  local function wrapLoadModule(c, g, stash)\n"
-	    "    _G[c] = _G[g]\n"
-	    "    _G[g] = function(name, ...)\n"
-	    "      if __mac_in_pload_flag then\n"
-	    "        -- yield: C runs module on root L, then resumes co; no return value\n"
-	    "        __mac_lm_yield_c({ tag = \"__mac_lm\", a1 = name })\n"
-	    "        return\n"
-	    "      end\n"
-	    "      _G[c](name, ...)\n"
-	    "      local r = _G[stash]\n"
-	    "      _G[stash] = nil\n"
-	    "      if not r then return end\n"
-	    "      local n = r.n or 0\n"
-	    "      if n <= 0 then return end\n"
-	    "      if n == 1 then return r.r1 end\n"
-	    "      if n == 2 then return r.r1, r.r2 end\n"
-	    "      return r.r1, r.r2, r.r3\n"
-	    "    end\n"
-	    "  end\n"
-	    "  wrapLoadModule('__mac_loadmodule_c', 'LoadModule', '__mac_loadmodule_result')\n"
-	    "  wrapPCall('__mac_pcall_c', 'PCall', '__mac_api_result')\n"
-	    "end\n";
-	if (luaL_dostring(L, kMacReturnApiWraps) != LUA_OK) {
-		sys->con->Printf("Warning: macOS return API wraps failed: %s\n", lua_tostring(L, -1));
-		lua_pop(L, 1);
-	}
-	lua_getglobal(L, "coroutine");
-	lua_getfield(L, -1, "yield");
-	sys->con->Printf("macOS: coroutine.yield is %s (isc=%d)\n", luaL_typename(L, -1),
-	                 lua_iscfunction(L, -1) ? 1 : 0);
-	lua_pop(L, 2);
-	lua_getglobal(L, "LoadModule");
-	sys->con->Printf("macOS: LoadModule is %s (isc=%d)\n", luaL_typename(L, -1),
-	                 lua_iscfunction(L, -1) ? 1 : 0);
-	lua_pop(L, 1);
-
-	// bit.* in LuaJIT 2.1 are LJLIB_ASM (lib_bit.c confirms this) — assembly-dispatch
-	// fastfunctions with a broken dispatch path on arm64 GC64. They SIGSEGV during
-	// Data/Global.lua loading when the GC runs a finalizer that calls bit.* with a
-	// cdata argument. Replace all with plain C (LIGHTFUNC) implementations.
-	// 32-bit semantics only; sha2.lua int64 cdata branch is not exercised on macOS
-	// because the update check is disabled (launch._isMacOS). (#8)
+	// bit.* LIGHTFUNC table must exist before kMacReturnApiWraps (wrapBit1). (#8)
 	{
 		auto tobit = [](lua_State* L) -> int {
 			lua_pushnumber(L, (int32_t)luaL_checknumber(L, 1));
@@ -2060,17 +2531,144 @@ void ui_main_c::ScriptInit()
 			lua_pushcfunction(L, op.fn);
 			lua_setfield(L, -2, op.name);
 		}
-		// Install as bit global and in package.loaded so require('bit') returns it.
 		lua_pushvalue(L, -1);
 		lua_setglobal(L, "bit");
 		lua_getglobal(L, "package");
 		lua_getfield(L, -1, "loaded");
-		lua_pushvalue(L, -3); // bit table
+		lua_pushvalue(L, -3);
 		lua_setfield(L, -2, "bit");
-		lua_pop(L, 2); // loaded, package
-		lua_pop(L, 1); // bit table
+		lua_pop(L, 2);
+		lua_pop(L, 1);
+		lua_pushcfunction(L, l_mac_bit_bnot_c);
+		lua_setglobal(L, "__mac_bit_bnot_c");
+		lua_pushcfunction(L, l_mac_bit_band_c);
+		lua_setglobal(L, "__mac_bit_band_c");
+		lua_pushcfunction(L, l_mac_bit_bxor_c);
+		lua_setglobal(L, "__mac_bit_bxor_c");
+		lua_pushcfunction(L, l_mac_or64_c);
+		lua_setglobal(L, "__mac_or64_c");
+		lua_pushcfunction(L, l_mac_and64_c);
+		lua_setglobal(L, "__mac_and64_c");
+		lua_pushcfunction(L, l_mac_xor64_c);
+		lua_setglobal(L, "__mac_xor64_c");
+		lua_pushcfunction(L, l_mac_not64_c);
+		lua_setglobal(L, "__mac_not64_c");
+		lua_pushcfunction(L, l_mac_build_skilltype_name_c);
+		lua_setglobal(L, "__mac_build_skilltype_name_c");
+		lua_pushcfunction(L, l_mac_fill_hollow_palm_added_phys_c);
+		lua_setglobal(L, "__mac_fill_hollow_palm_added_phys_c");
+		lua_pushcfunction(L, l_mac_pload_misc_c);
+		lua_setglobal(L, "__mac_pload_misc_c");
+		lua_pushcfunction(L, l_mac_pload_misc_now_c);
+		lua_setglobal(L, "__mac_pload_misc_now_c");
+		lua_pushcfunction(L, l_mac_pload_data_after_misc_c);
+		lua_setglobal(L, "__mac_pload_data_after_misc_c");
 		sys->con->Printf("macOS: bit.* replaced with LIGHTFUNC (32-bit, arm64 GC64 safe).\n");
 	}
+
+	// Re-return C API results from Lua functions (bytecode cannot capture C returns on arm64 GC64). (#8)
+	static char const* const kMacReturnApiWraps =
+	    "do\n"
+	    "  local function wrap1(c, g, stash)\n"
+	    "    _G[c] = _G[g]\n"
+	    "    _G[g] = function(...)\n"
+	    "      _G[c](...)\n"
+	    "      local r = _G[stash]\n"
+	    "      _G[stash] = nil\n"
+	    "      return r\n"
+	    "    end\n"
+	    "  end\n"
+	    "  local function wrap2(c, g, stash)\n"
+	    "    _G[c] = _G[g]\n"
+	    "    _G[g] = function(...)\n"
+	    "      _G[c](...)\n"
+	    "      local r = _G[stash]\n"
+	    "      _G[stash] = nil\n"
+	    "      return r[1], r[2]\n"
+	    "    end\n"
+	    "  end\n"
+	    "  local function wrapPCall(c, g, stash)\n"
+	    "    _G[c] = _G[g]\n"
+	    "    _G[g] = function(...)\n"
+	    "      _G[c](...)\n"
+	    "      local r = _G[stash]\n"
+	    "      _G[stash] = nil\n"
+	    "      return r[1], r[2], r[3], r[4], r[5]\n"
+	    "    end\n"
+	    "  end\n"
+	    "  wrap1('__mac_gettime_c', 'GetTime', '__mac_api_result')\n"
+	    "  wrap2('__mac_getscreensize_c', 'GetScreenSize', '__mac_api_result')\n"
+	    "  wrap1('__mac_getscreenscale_c', 'GetScreenScale', '__mac_api_result')\n"
+	    "  __mac_module_depth = 0\n"
+	    "  local function wrapLoadModulePload(name, ...)\n"
+	    "    local nested = __mac_module_depth > 0\n"
+	    "    local chunk = __mac_lm_yield_c({ tag = \"__mac_lm\", a1 = name, nested = nested, a2 = select(1, ...) })\n"
+	    "    if type(chunk) == \"function\" then\n"
+	    "      __mac_module_depth = __mac_module_depth + 1\n"
+	    "      chunk(...)\n"
+	    "      __mac_module_depth = __mac_module_depth - 1\n"
+	    "    end\n"
+	    "  end\n"
+	    "  do\n"
+	    "    local c = '__mac_loadmodule_c'\n"
+	    "    local g = 'LoadModule'\n"
+	    "    local stash = '__mac_loadmodule_result'\n"
+	    "    _G[c] = _G[g]\n"
+	    "    _G[g] = function(name, ...)\n"
+	    "      if __mac_in_pload_flag then\n"
+	    "        wrapLoadModulePload(name, ...)\n"
+	    "        return\n"
+	    "      end\n"
+	    "      _G[c](name, ...)\n"
+	    "      local r = _G[stash]\n"
+	    "      _G[stash] = nil\n"
+	    "      if not r then return end\n"
+	    "      local n = r.n or 0\n"
+	    "      if n <= 0 then return end\n"
+	    "      if n == 1 then return r.r1 end\n"
+	    "      if n == 2 then return r.r1, r.r2 end\n"
+	    "      return r.r1, r.r2, r.r3\n"
+	    "    end\n"
+	    "  end\n"
+	    "  wrapPCall('__mac_pcall_c', 'PCall', '__mac_api_result')\n"
+	    "  local function wrapBit1(c, fn, stash)\n"
+	    "    bit[fn] = function(...)\n"
+	    "      _G[c](...)\n"
+	    "      local r = _G[stash]\n"
+	    "      _G[stash] = nil\n"
+	    "      return r\n"
+	    "    end\n"
+	    "  end\n"
+	    "  wrapBit1('__mac_bit_bnot_c', 'bnot', '__mac_api_result')\n"
+	    "  wrapBit1('__mac_bit_band_c', 'band', '__mac_api_result')\n"
+	    "  wrapBit1('__mac_bit_bxor_c', 'bxor', '__mac_api_result')\n"
+	    "  local function wrap64c(c, g)\n"
+	    "    _G[g] = function(...)\n"
+	    "      _G[c](...)\n"
+	    "      local r = _G['__mac_api_result']\n"
+	    "      _G['__mac_api_result'] = nil\n"
+	    "      return r\n"
+	    "    end\n"
+	    "  end\n"
+	    "  wrap64c('__mac_or64_c', 'OR64')\n"
+	    "  wrap64c('__mac_and64_c', 'AND64')\n"
+	    "  wrap64c('__mac_xor64_c', 'XOR64')\n"
+	    "  wrap64c('__mac_not64_c', 'NOT64')\n"
+	    "end\n";
+	if (luaL_dostring(L, kMacReturnApiWraps) != LUA_OK) {
+		sys->con->Printf("Warning: macOS return API wraps failed: %s\n", lua_tostring(L, -1));
+		lua_pop(L, 1);
+	}
+	lua_getglobal(L, "coroutine");
+	lua_getfield(L, -1, "yield");
+	sys->con->Printf("macOS: coroutine.yield is %s (isc=%d)\n", luaL_typename(L, -1),
+	                 lua_iscfunction(L, -1) ? 1 : 0);
+	lua_pop(L, 2);
+	lua_getglobal(L, "LoadModule");
+	sys->con->Printf("macOS: LoadModule is %s (isc=%d)\n", luaL_typename(L, -1),
+	                 lua_iscfunction(L, -1) ? 1 : 0);
+	lua_pop(L, 1);
+
 	lua_pushcfunction(L, l_mac_setmetatable);
 	lua_setglobal(L, "setmetatable");
 	lua_getglobal(L, "coroutine");

@@ -568,7 +568,7 @@ Target command: `brew install --cask path-of-building-2`
   deeply nested `lua_pcall` frame depth (PLoadModule → Main → LoadModule(Data) → LoadModule(Data/Global)).
   `Data/Global.lua` is pure table literals (no require/pcall), so the hang is in the pcall frame
   setup, not in Lua logic. **Next attempt:** try `lua_call` (unprotected) for inner `LoadModule`.
-- **2026-05-25** — **#8 MILESTONE: full UI renders on macOS.** Five engine fixes in one session:
+- **2026-05-27** — **Data.lua PLoad tail / `data.misc` bisect:** Misc inline on root OK; preamble (8–111) + `powerStatList` stub OK; **`data.misc = {` (line 171) SIGILL** on root tail `lua_pcall` even for empty table. Harness: `scripts/macos/bisect-data-misc.sh`, `POB_MAC_BISECT_DATA_MISC=1`. Handoff: **`docs/macos/claude-handoff-data-misc-tail.md`**. Patrick may pivot approach — see handoff § Alternative approaches.
   (1) `l_PCall` switched from `mac_lightfunc_pcall`/`lua_resume` to `lua_pcall` — nested resume
   inside the `CallCallbackOnThread` coroutine silently dropped all draw commands from `main:OnFrame()`.
   (2) `bit.*` originals kept at time of milestone (wrongly believed LJLIB_CF). **2026-05-28

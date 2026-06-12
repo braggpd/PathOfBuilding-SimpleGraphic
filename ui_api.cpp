@@ -2063,6 +2063,18 @@ static bool mac_bisect_global_enabled()
 	return v && v[0] != '\0' && v[0] != '0';
 }
 
+static bool mac_bisect_misc_enabled()
+{
+	const char* v = std::getenv("POB_MAC_BISECT_MISC");
+	return v && v[0] != '\0' && v[0] != '0';
+}
+
+bool mac_bisect_data_misc_enabled()
+{
+	const char* v = std::getenv("POB_MAC_BISECT_DATA_MISC");
+	return v && v[0] != '\0' && v[0] != '0';
+}
+
 static std::pair<int, int> mac_bisect_line_range()
 {
 	int start = 1;
@@ -2090,9 +2102,10 @@ static std::pair<int, int> mac_bisect_line_range()
 	return { start, end };
 }
 
-// Run only lines [startLine..endLine] of Global.lua (1-based, inclusive). (#8 bisect)
-static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
-                                      int startLine, int requestedEndLine)
+// Run only lines [startLine..endLine] (1-based, inclusive). passDataArg: pcall with one data table. (#8 bisect)
+static bool mac_load_lua_file_slice(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
+                                    int startLine, int requestedEndLine, const char* bisectLabel,
+                                    bool passDataArg, int dataPreambleAfterLine)
 {
 	int endLine = requestedEndLine;
 	std::ifstream in(filePath);
@@ -2175,6 +2188,9 @@ static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::fi
 
 	std::ostringstream chunk;
 	chunk << "-- macOS bisect slice " << startLine << '-' << endLine << '\n';
+	if (passDataArg && startLine > dataPreambleAfterLine) {
+		chunk << "local data = select(1, ...)\n";
+	}
 	chunk << "do\n";
 	std::string wrapTable;
 	int assignFrom = startLine - 1; // 0-based index of first line to emit as assignments
@@ -2204,7 +2220,8 @@ static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::fi
 		}
 	}
 	// Assignment slices only work inside table literals; mid-function ranges use raw + brace balance.
-	const bool useAssignments = !wrapTable.empty() &&
+	// Misc.lua: always raw — entries are `data.field = { huge literal }` one-liners. (#8 bisect)
+	const bool useAssignments = !passDataArg && !wrapTable.empty() &&
 	    (startLine == 1 || looks_like_table_entry(lines[(size_t)startLine - 1]) ||
 	     strip_lua_comment(lines[(size_t)startLine - 1]).find("= {") != std::string::npos);
 	if (useAssignments) {
@@ -2270,7 +2287,11 @@ static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::fi
 		lua_settop(L, 0);
 		return false;
 	}
-	const int runErr = lua_pcall(L, 0, 0, 0);
+	const int pcallArgs = passDataArg ? 1 : 0;
+	if (passDataArg) {
+		lua_newtable(L);
+	}
+	const int runErr = lua_pcall(L, pcallArgs, 0, 0);
 	if (runErr != LUA_OK) {
 		ui->sys->con->Printf("BISECT: run lines %d-%d failed: %s\n", startLine, endLine,
 		                     lua_tostring(L, -1));
@@ -2278,14 +2299,207 @@ static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::fi
 		return false;
 	}
 	if (useAssignments && !wrapTable.empty()) {
-		ui->sys->con->Printf("macOS BISECT: executed lines %d-%d as %s.* assignments\n", startLine, endLine,
-		                     wrapTable.c_str());
+		ui->sys->con->Printf("macOS BISECT: %s.lua executed lines %d-%d as %s.* assignments\n", bisectLabel,
+		                     startLine, endLine, wrapTable.c_str());
 	} else {
-		ui->sys->con->Printf("macOS BISECT: executed lines %d-%d (requested %d)\n", startLine, endLine,
-		                     requestedEndLine);
+		ui->sys->con->Printf("macOS BISECT: %s.lua executed lines %d-%d (requested %d)\n", bisectLabel,
+		                     startLine, endLine, requestedEndLine);
 	}
 	lua_settop(L, 0);
 	return true;
+}
+
+static bool mac_load_global_lua_slice(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
+                                      int startLine, int requestedEndLine)
+{
+	return mac_load_lua_file_slice(L, ui, filePath, startLine, requestedEndLine, "Global", false, 0);
+}
+
+static bool mac_load_misc_lua_slice(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
+                                    int startLine, int requestedEndLine)
+{
+	return mac_load_lua_file_slice(L, ui, filePath, startLine, requestedEndLine, "Misc", true, 3);
+}
+
+static bool mac_module_is_global(const char* modName)
+{
+	return modName && std::strstr(modName, "Global") != nullptr;
+}
+
+bool mac_module_is_misc(const char* modName)
+{
+	return modName && std::strstr(modName, "Misc") != nullptr;
+}
+
+// PLoad: run Data.lua locals (8-111) + body (117-end) on root; co only runs Global + C hooks. (#8)
+std::string mac_build_pload_data_tail_chunk(ui_main_c* ui, int endLine)
+{
+	const auto filePath = (ui->scriptPath / "Modules/Data.lua").lexically_normal();
+	std::ifstream in(filePath);
+	std::ostringstream out;
+	out << "-- macOS PLoad Data.lua tail (lines 8-111 + 117-" << endLine << " on root). (#8)\n";
+	out << "local data = select(1, ...)\n";
+	std::string line;
+	int lineNum = 0;
+	while (std::getline(in, line)) {
+		lineNum++;
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		const bool skipPreamble = std::getenv("POB_MAC_BISECT_DATA_NO_PREAMBLE");
+		const bool inPreamble = !skipPreamble && lineNum >= 8 && lineNum <= 111;
+		// powerStatList (117-170): nested tables + transform=function hang/crash arm64 GC64 on root.
+		const bool inBody = lineNum >= 171 && lineNum <= endLine;
+		if (inPreamble || inBody) {
+			if (inBody && line.find("transform=function") != std::string::npos) {
+				continue;
+			}
+			out << line << '\n';
+		}
+		if (lineNum == 170 && endLine >= 171) {
+			out << "data.powerStatList = {} -- macOS PLoad stub (lines 117-170 skipped arm64 GC64). "
+			       "(#8)\n";
+		}
+	}
+	// Bisect mid-table: close data.misc (lines 171-248) when slice ends before line 248.
+	if (endLine >= 171 && endLine < 248) {
+		out << "} -- macOS bisect: close data.misc\n";
+	}
+	return out.str();
+}
+
+bool mac_run_module_chunk_fresh_co(lua_State* L, int chunkIdx, int nargs, const char** errOut)
+{
+	return mac_run_loaded_chunk_fresh_co(L, chunkIdx, nargs, errOut);
+}
+
+int mac_lua_load_module_file(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
+                             const char* modName)
+{
+	const std::string fileStr = filePath.generic_u8string();
+	const bool isGlobal = mac_module_is_global(modName);
+	const bool isMisc = mac_module_is_misc(modName);
+	const bool isDataModule = modName && std::strstr(modName, "Modules/Data") != nullptr;
+	const bool patchDataMisc = isDataModule && mac_is_in_pload();
+	if (!isGlobal && !isMisc && !patchDataMisc) {
+		ui->sys->SetWorkDir(ui->scriptPath);
+		const int err = luaL_loadfile(L, fileStr.c_str());
+		ui->sys->SetWorkDir(ui->scriptWorkDir);
+		return err;
+	}
+	std::ifstream in(filePath);
+	if (!in) {
+		return LUA_ERRFILE;
+	}
+	// Global: OR64/AND64/XOR64/NOT64 division on locals — SIGSEGV on arm64 GC64. (#8)
+	constexpr int globalSkipStart = 106;
+	constexpr int globalSkipEnd = 209;
+	// Misc: nested [n]={a,b} under hollowPalmAddedPhys — GC64 interpreter hang. (#8)
+	constexpr int miscSkipStart = 322;
+	constexpr int miscSkipEnd = 364;
+	std::ostringstream out;
+	std::string line;
+	int lineNum = 0;
+	bool miscReplacementEmitted = false;
+	bool dataTailGateOpen = false;
+	while (std::getline(in, line)) {
+		lineNum++;
+		if (patchDataMisc && line.find("LoadModule(\"Data/Misc\"") != std::string::npos) {
+			out << "__mac_pload_data_after_misc_c(data) -- macOS PLoad Misc+tail on root (#8)\n";
+			out << "if true then return else -- macOS PLoad co body skipped (#8)\n";
+			dataTailGateOpen = true;
+			continue;
+		}
+		if (isGlobal && lineNum >= globalSkipStart && lineNum <= globalSkipEnd) {
+			continue;
+		}
+		if (isMisc && lineNum >= miscSkipStart && lineNum <= miscSkipEnd) {
+			if (!miscReplacementEmitted) {
+				out << "-- From FlatPhysicalDamageValues.dat (engine C fill on macOS — nested table hang "
+				       "arm64 GC64). (#8)\n";
+				out << "__mac_misc_data_for_hollow_palm = data\n";
+				miscReplacementEmitted = true;
+			}
+			continue;
+		}
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		out << line << '\n';
+	}
+	if (patchDataMisc && dataTailGateOpen) {
+		out << "end -- macOS PLoad Data.lua co body skipped\n";
+	}
+	if (isGlobal) {
+		ui->sys->con->Printf(
+		    "macOS: Global.lua load skips lines %d-%d (engine C OR64/AND64/XOR64/NOT64). (#8)\n",
+		    globalSkipStart, globalSkipEnd);
+	}
+	if (isMisc) {
+		ui->sys->con->Printf(
+		    "macOS: Misc.lua load skips lines %d-%d (hollowPalmAddedPhys C fill). (#8)\n", miscSkipStart,
+		    miscSkipEnd);
+	}
+	if (patchDataMisc) {
+		ui->sys->con->Printf(
+		    "macOS: Data.lua PLoad patch: Misc inline + tail on root (co body gated). (#8)\n");
+	}
+	std::string buf = out.str();
+	if (isGlobal) {
+		const char* const kSkillTypeLoop =
+		    "-- build reverse lookup\n"
+		    "SkillTypeName = {}\n"
+		    "for k, v in pairs(SkillType) do\n"
+		    "  SkillTypeName[v] = k\n"
+		    "end\n";
+		const char* const kSkillTypeLoopReplace =
+		    "-- build reverse lookup (C on macOS — pairs loop SIGSEGV on arm64 GC64)\n"
+		    "SkillTypeName = {}\n"
+		    "__mac_build_skilltype_name_c()\n";
+		if (const size_t pos = buf.find(kSkillTypeLoop); pos != std::string::npos) {
+			buf.replace(pos, std::strlen(kSkillTypeLoop), kSkillTypeLoopReplace);
+		}
+	}
+	ui->sys->SetWorkDir(ui->scriptPath);
+	const int err = luaL_loadbuffer(L, buf.c_str(), buf.size(), fileStr.c_str());
+	ui->sys->SetWorkDir(ui->scriptWorkDir);
+	return err;
+}
+
+bool mac_try_bisect_global_module(lua_State* L, ui_main_c* ui, const char* modName)
+{
+	auto filePath = mac_module_file_path(ui, modName);
+	const auto fileStr = filePath.generic_u8string();
+	if (!mac_bisect_global_enabled() || fileStr.find("Global.lua") == std::string::npos) {
+		return false;
+	}
+	const auto range = mac_bisect_line_range();
+	ui->sys->con->Printf("macOS BISECT: Global.lua lines %d-%d (PLoad yield path)\n", range.first,
+	                     range.second);
+	if (!mac_load_global_lua_slice(L, ui, filePath, range.first, range.second)) {
+		ui->sys->con->Printf("macOS BISECT: Global.lua slice FAILED — exiting\n");
+		std::exit(1);
+	}
+	ui->sys->con->Printf("macOS BISECT: Global.lua slice OK — exiting\n");
+	std::exit(0);
+}
+
+bool mac_try_bisect_misc_module(lua_State* L, ui_main_c* ui, const char* modName)
+{
+	auto filePath = mac_module_file_path(ui, modName);
+	const auto fileStr = filePath.generic_u8string();
+	if (!mac_bisect_misc_enabled() || fileStr.find("Misc.lua") == std::string::npos) {
+		return false;
+	}
+	const auto range = mac_bisect_line_range();
+	ui->sys->con->Printf("macOS BISECT: Misc.lua lines %d-%d (PLoad yield path)\n", range.first,
+	                     range.second);
+	if (!mac_load_misc_lua_slice(L, ui, filePath, range.first, range.second)) {
+		ui->sys->con->Printf("macOS BISECT: Misc.lua slice FAILED — exiting\n");
+		std::exit(1);
+	}
+	ui->sys->con->Printf("macOS BISECT: Misc.lua slice OK — exiting\n");
+	std::exit(0);
 }
 
 static int l_LoadModule(lua_State* L)
@@ -2299,7 +2513,8 @@ static int l_LoadModule(lua_State* L)
 		luaL_error(L, "LoadModule() argument 1: expected string, got %s", luaL_typename(L, 1));
 	}
 	const int extraArgs = n - 1;
-	auto filePath = mac_module_file_path(ui, lua_tostring(L, 1));
+	const char* modNameStr = lua_tostring(L, 1);
+	auto filePath = mac_module_file_path(ui, modNameStr);
 	auto fileStr = filePath.generic_u8string();
 	if (mac_bisect_global_enabled() && fileStr.find("Data/Global.lua") != std::string::npos) {
 		const auto range = mac_bisect_line_range();
@@ -2311,33 +2526,45 @@ static int l_LoadModule(lua_State* L)
 		ui->sys->con->Printf("macOS BISECT: Global.lua slice OK — exiting (do not continue Data.lua)\n");
 		std::exit(0); // bisect probes must not return into Data.lua / Misc.lua loads
 	}
-	// LuaJIT arm64 GC64: incremental GC steps triggered by allocations inside the
-	// interpreter loop truncate 64-bit GCobj pointers to 32 bits when traversing
-	// table entries. If the lower 32 bits are 0 (object at a 4GB-multiple address)
-	// the traversal reads from address 0 → SIGSEGV (EXC_BAD_ACCESS, FAR=0). (#8)
-	// Stop incremental GC for the duration of this LoadModule call. Depth-counted
-	// so nested LoadModule calls don't prematurely restart GC.
-	static int s_gcStopDepth = 0;
-	if (s_gcStopDepth == 0) lua_gc(L, LUA_GCSTOP, 0);
-	s_gcStopDepth++;
+	if (mac_bisect_misc_enabled() && fileStr.find("Misc.lua") != std::string::npos) {
+		const auto range = mac_bisect_line_range();
+		ui->sys->con->Printf("macOS BISECT: Misc.lua lines %d-%d\n", range.first, range.second);
+		if (!mac_load_misc_lua_slice(L, ui, filePath, range.first, range.second)) {
+			ui->sys->con->Printf("macOS BISECT: Misc.lua slice FAILED — exiting\n");
+			std::exit(1);
+		}
+		ui->sys->con->Printf("macOS BISECT: Misc.lua slice OK — exiting\n");
+		std::exit(0);
+	}
+	// Stop incremental GC only for Global.lua (NOT64 / GC64). Data modules (Misc) need GC on. (#8)
+	const bool holdGcHere = !mac_is_in_pload() && mac_module_is_global(modNameStr);
+	if (holdGcHere) {
+		mac_gc64_stop_gc(L);
+	}
 
 	ui->sys->SetWorkDir(ui->scriptPath);
-	int err = luaL_loadfile(L, fileStr.c_str());
+	int err = mac_lua_load_module_file(L, ui, filePath, modNameStr);
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	if (err != 0) {
-		s_gcStopDepth--;
-		if (s_gcStopDepth == 0) lua_gc(L, LUA_GCRESTART, 0);
+		if (holdGcHere) {
+			mac_gc64_restart_gc(L);
+		}
 		const char* msg = lua_tostring(L, -1);
 		luaL_error(L, "LoadModule() error loading '%s' (%d):\n%s", fileStr.c_str(), err,
 		           msg ? msg : "unknown error");
 	}
 	lua_replace(L, 1);
 	const int runErr = lua_pcall(L, extraArgs, LUA_MULTRET, 0);
-	s_gcStopDepth--;
-	if (s_gcStopDepth == 0) lua_gc(L, LUA_GCRESTART, 0);
 	if (runErr != LUA_OK) {
+		if (holdGcHere) {
+			mac_gc64_restart_gc(L);
+		}
 		luaL_error(L, "LoadModule() error running '%s':\n%s", fileStr.c_str(),
 		           lua_tostring(L, -1));
+	}
+	mac_misc_hollow_palm_fill_if_needed(L);
+	if (holdGcHere) {
+		mac_gc64_restart_gc(L);
 	}
 	int nresults = lua_gettop(L);
 
@@ -2490,7 +2717,6 @@ static bool mac_run_pload_module_impl(lua_State* L, ui_main_c* ui, int extraArgs
 		return false;
 	}
 	lua_replace(L, 1);
-	// Coroutine + __mac_lm yield: nested loads run on root via lua_call (no nested pcall). (#8)
 	const int nret = mac_pload_coroutine_call(L, extraArgs, nullptr);
 	const bool ok = nret >= 1 && lua_toboolean(L, 1);
 	if (!ok && nret < 2) {

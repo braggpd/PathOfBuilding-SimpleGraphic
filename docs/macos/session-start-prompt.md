@@ -39,10 +39,17 @@ Check which GitHub issues are open vs closed:
 gh issue list -l macos-port --state all
 ```
 
-## Step 3b: Current blocker (if still on issue #8 / Main load)
+## Step 3b: Current blocker (Data.lua PLoad tail / `data.misc`)
 
-Read **`docs/macos/claude-handoff-plm-nested-load.md`** and use the **Session prompt** block there.
-Active bug: nested `l_LoadModule` (Data → Global) under `mac_pload_coroutine_call` — SIGSEGV on full launch.
+Read **`docs/macos/claude-handoff-data-misc-tail.md`** and use the **Session prompt** block there.
+
+Active bug: root tail `lua_pcall` for `Data.lua` SIGILLs at line 171 (`data.misc = {`). Misc inline + preamble-only tail OK. Engine changes likely **uncommitted** on `macos/issue-8-sync-smoke-merge`.
+
+Patrick may pivot away from slice-and-patch — confirm approach before implementing.
+
+## Step 3c: Older blocker (nested LoadModule — partially addressed)
+
+If still relevant: **`docs/macos/claude-handoff-plm-nested-load.md`**
 
 ## Step 4: Evaluate and propose
 

@@ -10,7 +10,13 @@ if (APPLE)
         COMMAND xcrun --sdk macosx --show-sdk-path
         OUTPUT_VARIABLE MACOS_SDK_PATH
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY
     )
+    # CLT/Xcode updates remove old SDK folders; stale CMakeCache sysroots break imgui/engine builds.
+    if(NOT CMAKE_OSX_SYSROOT OR NOT EXISTS "${CMAKE_OSX_SYSROOT}")
+        set(CMAKE_OSX_SYSROOT "${MACOS_SDK_PATH}" CACHE PATH "macOS SDK sysroot" FORCE)
+        message(STATUS "macOS: CMAKE_OSX_SYSROOT -> ${CMAKE_OSX_SYSROOT}")
+    endif()
     add_compile_options(
         "$<$<OR:$<COMPILE_LANGUAGE:CXX>,$<COMPILE_LANGUAGE:OBJCXX>>:-isystem${MACOS_SDK_PATH}/usr/include/c++/v1>"
     )
