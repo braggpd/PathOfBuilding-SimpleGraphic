@@ -111,6 +111,19 @@ file(REMOVE_RECURSE
     "${CURRENT_PACKAGES_DIR}/share/man"
 )
 
+# LuaJIT installs a versioned binary (e.g. luajit-2.1.0-beta3) and a symlink.
+# vcpkg_copy_tools resolves symlinks; ensure a plain "luajit" file exists.
+if(NOT EXISTS "${CURRENT_PACKAGES_DIR}/bin/luajit")
+    file(GLOB _luajit_versioned "${CURRENT_PACKAGES_DIR}/bin/luajit-*")
+    if(_luajit_versioned)
+        list(GET _luajit_versioned 0 _luajit_bin)
+        file(COPY "${_luajit_bin}" DESTINATION "${CURRENT_PACKAGES_DIR}/bin")
+        get_filename_component(_luajit_name "${_luajit_bin}" NAME)
+        file(RENAME "${CURRENT_PACKAGES_DIR}/bin/${_luajit_name}"
+                    "${CURRENT_PACKAGES_DIR}/bin/luajit")
+    endif()
+endif()
+
 vcpkg_copy_tools(TOOL_NAMES luajit AUTO_CLEAN)
 
 vcpkg_fixup_pkgconfig()
