@@ -26,10 +26,11 @@
 
  /* Base64 encoding/decoding */
 
-#include "base64.h"
-
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "base64.h"
 
 /* ---- Base64 Encoding/Decoding Table --- */
 /* Padding character string starts at offset 64. */
