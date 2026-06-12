@@ -4,7 +4,9 @@
 // Module: Render Texture
 //
 
+#include <algorithm>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <atomic>
 #include "r_local.h"

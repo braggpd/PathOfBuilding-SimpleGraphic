@@ -308,7 +308,7 @@ add_library(lua-utf8 SHARED libs/luautf8/lutf8lib.c)
 
 target_compile_definitions(lua-utf8
     PRIVATE
-    LUA_BUILD_AS_DLL
+    $<$<BOOL:${WIN32}>:LUA_BUILD_AS_DLL>
 )
 
 target_include_directories(lua-utf8
@@ -325,6 +325,14 @@ install(FILES $<TARGET_RUNTIME_DLLS:lua-utf8> DESTINATION ".")
 
 # luasocket module
 
+if(WIN32)
+    set(LUASOCKET_PLATFORM_SRC "libs/luasocket/src/wsocket.c")
+    set(LUASOCKET_PLATFORM_LIBS wsock32 ws2_32)
+else()
+    set(LUASOCKET_PLATFORM_SRC "libs/luasocket/src/usocket.c")
+    set(LUASOCKET_PLATFORM_LIBS "")
+endif()
+
 add_library(luasocket SHARED
    "libs/luasocket/src/auxiliar.c"
    "libs/luasocket/src/buffer.c"
@@ -338,7 +346,7 @@ add_library(luasocket SHARED
    "libs/luasocket/src/tcp.c"
    "libs/luasocket/src/timeout.c"
    "libs/luasocket/src/udp.c"
-   "libs/luasocket/src/wsocket.c"
+   ${LUASOCKET_PLATFORM_SRC}
 )
 
 target_include_directories(luasocket
@@ -349,8 +357,7 @@ target_include_directories(luasocket
 target_link_libraries(luasocket
     PRIVATE
     LuaJIT::LuaJIT
-    wsock32
-    ws2_32
+    ${LUASOCKET_PLATFORM_LIBS}
 )
 
 set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" ) 
