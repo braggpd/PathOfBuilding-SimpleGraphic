@@ -128,6 +128,11 @@ find_package(re2 CONFIG REQUIRED)
 find_package(sol2 CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 find_package(zstd REQUIRED)
+if(TARGET zstd::libzstd_shared)
+    set(ZSTD_TARGET zstd::libzstd_shared)
+else()
+    set(ZSTD_TARGET zstd::libzstd_static)
+endif()
 find_package(ZLIB REQUIRED)
 find_package(WebP)
 
@@ -240,7 +245,7 @@ target_link_libraries(SimpleGraphic
     Threads::Threads
     WebP::webpdecoder
     ZLIB::ZLIB
-    zstd::libzstd_shared
+    ${ZSTD_TARGET}
 )
 
 install(FILES $<TARGET_RUNTIME_DLLS:SimpleGraphic> DESTINATION ".")
