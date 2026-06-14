@@ -311,6 +311,10 @@ target_compile_definitions(lua-utf8
     $<$<BOOL:${WIN32}>:LUA_BUILD_AS_DLL>
 )
 
+if(NOT WIN32)
+    target_compile_options(lua-utf8 PRIVATE -include limits.h)
+endif()
+
 target_include_directories(lua-utf8
     PRIVATE
 )
