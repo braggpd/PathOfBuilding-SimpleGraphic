@@ -78,18 +78,18 @@ set(SIMPLEGRAPHIC_SOURCES
 
 set (SIMPLEGRAPHIC_PLATFORM_SOURCES)
 if (APPLE)
-    set (SIMPLEGRAPHIC_PLATFORM_SOURCES
+    list (APPEND SIMPLEGRAPHIC_PLATFORM_SOURCES
         "engine/system/win/sys_macos.mm"
     )
 endif()
 
 if (WIN32)
-    set (SIMPLEGRAPHIC_PLATFORM_SOURCES
+    list (APPEND SIMPLEGRAPHIC_PLATFORM_SOURCES
         "engine/system/win/sys_console.cpp"
         "SimpleGraphic.rc"
     )
 else()
-    set (SIMPLEGRAPHIC_PLATFORM_SOURCES
+    list (APPEND SIMPLEGRAPHIC_PLATFORM_SOURCES
         "engine/system/win/sys_console_unix.cpp"
     )
 endif()
@@ -296,8 +296,13 @@ target_include_directories(lcurl
 target_link_libraries(lcurl
     PRIVATE
     CURL::libcurl
-    LuaJIT::LuaJIT
+    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
 )
+
+if(APPLE)
+    target_include_directories(lcurl PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_options(lcurl PRIVATE -undefined dynamic_lookup)
+endif()
 
 install(TARGETS lcurl RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:lcurl> DESTINATION ".")
@@ -321,8 +326,13 @@ target_include_directories(lua-utf8
 
 target_link_libraries(lua-utf8
     PRIVATE
-    LuaJIT::LuaJIT
+    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
 )
+
+if(APPLE)
+    target_include_directories(lua-utf8 PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_options(lua-utf8 PRIVATE -undefined dynamic_lookup)
+endif()
 
 install(TARGETS lua-utf8 RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:lua-utf8> DESTINATION ".")
@@ -360,11 +370,16 @@ target_include_directories(luasocket
 
 target_link_libraries(luasocket
     PRIVATE
-    LuaJIT::LuaJIT
+    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
     ${LUASOCKET_PLATFORM_LIBS}
 )
 
-set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" ) 
+if(APPLE)
+    target_include_directories(luasocket PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_options(luasocket PRIVATE -undefined dynamic_lookup)
+endif()
+
+set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" )
 install(TARGETS luasocket RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:luasocket> DESTINATION ".")
 
@@ -378,9 +393,14 @@ target_include_directories(lzip
 
 target_link_libraries(lzip
     PRIVATE
-    LuaJIT::LuaJIT
+    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
     ZLIB::ZLIB
 )
+
+if(APPLE)
+    target_include_directories(lzip PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_options(lzip PRIVATE -undefined dynamic_lookup)
+endif()
 
 install(TARGETS lzip RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:lzip> DESTINATION ".")
