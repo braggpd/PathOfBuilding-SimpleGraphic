@@ -62,7 +62,6 @@ set(SIMPLEGRAPHIC_SOURCES
     "engine/system/sys_main.h"
     "engine/system/sys_opengl.h"
     "engine/system/sys_video.h"
-    "win/entry.cpp"
     "ui.h"
     "ui_api.cpp"
     "ui_console.cpp"
@@ -75,6 +74,14 @@ set(SIMPLEGRAPHIC_SOURCES
     "ui_subscript.cpp"
     "ui_subscript.h"
 )
+
+if (APPLE)
+    list(APPEND SIMPLEGRAPHIC_SOURCES "mac/entry.cpp")
+elseif (WIN32)
+    list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
+else ()
+    list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
+endif ()
 
 set (SIMPLEGRAPHIC_PLATFORM_SOURCES)
 if (APPLE)
@@ -222,10 +229,12 @@ endif ()
 if (APPLE)
     find_library(CORE_FOUNDATION_LIBRARY CoreFoundation)
     find_library(APPLICATION_SERVICES_LIBRARY ApplicationServices)
+    find_library(FOUNDATION_FRAMEWORK Foundation)
     target_link_libraries(SimpleGraphic
         PRIVATE
         ${CORE_FOUNDATION_LIBRARY}
         ${APPLICATION_SERVICES_LIBRARY}
+        ${FOUNDATION_FRAMEWORK}
     )
 endif ()
 
@@ -248,8 +257,26 @@ target_link_libraries(SimpleGraphic
     ${ZSTD_TARGET}
 )
 
+if (APPLE)
+    set(PoB_HOST_TARGET pob-host)
+    add_executable(${PoB_HOST_TARGET} mac/host.cpp)
+    set_target_properties(${PoB_HOST_TARGET} PROPERTIES
+        OUTPUT_NAME "Path of Building-PoE2"
+    )
+    target_link_libraries(${PoB_HOST_TARGET} PRIVATE SimpleGraphic)
+    set(_macos_host_rpath "@executable_path/../Frameworks;@executable_path;@loader_path")
+    set_target_properties(SimpleGraphic ${PoB_HOST_TARGET}
+        PROPERTIES
+            BUILD_RPATH "${_macos_host_rpath}"
+            INSTALL_RPATH "${_macos_host_rpath}"
+            MACOSX_RPATH ON
+    )
+    install(TARGETS SimpleGraphic LIBRARY DESTINATION ".")
+    install(TARGETS ${PoB_HOST_TARGET} RUNTIME DESTINATION ".")
+else ()
+    install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
+endif ()
 install(FILES $<TARGET_RUNTIME_DLLS:SimpleGraphic> DESTINATION ".")
-install(TARGETS SimpleGraphic RUNTIME DESTINATION ".")
 
 if (WIN32)
     set(DEPS_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
