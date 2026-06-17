@@ -10,31 +10,6 @@
 
 struct ui_expectationFailed_s {};
 
-#if __APPLE__ && __MACH__
-#include <string>
-// Custom LuaJIT allocator: ensures no address in [user, user+nsize) has lower
-// 32 bits = 0, preventing 4GB-boundary crashes on arm64 GC64. (#8)
-void* mac_gc64_alloc(void* ud, void* ptr, size_t osize, size_t nsize);
-// Refcounted GC pause: PLoad module pcall + nested LoadModule share one stop. (#8)
-void mac_gc64_stop_gc(lua_State* L);
-void mac_gc64_restart_gc(lua_State* L);
-bool mac_try_bisect_global_module(lua_State* L, ui_main_c* ui, const char* modName);
-bool mac_try_bisect_misc_module(lua_State* L, ui_main_c* ui, const char* modName);
-bool mac_bisect_data_misc_enabled();
-int mac_lua_load_module_file(lua_State* L, ui_main_c* ui, const std::filesystem::path& filePath,
-                             const char* modName);
-void mac_misc_hollow_palm_fill_if_needed(lua_State* L);
-bool mac_module_is_misc(const char* modName);
-bool mac_pload_run_deferred_misc(lua_State* L, ui_main_c* ui);
-std::string mac_build_pload_data_tail_chunk(ui_main_c* ui, int endLine = 100000);
-void mac_sync_co_globals_to_root(lua_State* root, lua_State* co);
-int mac_pload_coroutine_continue(lua_State* L);
-#define MAC_PLOAD_MISC_DEFER (-999)
-bool mac_run_module_chunk_fresh_co(lua_State* L, int chunkIdx, int nargs, const char** errOut);
-bool mac_pload_module_pcall(lua_State* L, const char* modName);
-void mac_sync_globals_from_helper_co(lua_State* L);
-#endif
-
 // UI Manager
 class ui_main_c: public ui_IMain {
 public:
@@ -80,6 +55,7 @@ public:
 	float lastColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
 	static int InitAPI(lua_State* L);
+	static void AppendLocalLuaSubdir(lua_State* L);
 
 	void	RenderInit(r_featureFlag_e features);
 	void	ScriptInit();
@@ -90,9 +66,6 @@ public:
 	int		IsUserData(lua_State* L, int index, const char* metaName);
 	int		PushCallback(const char* name);
 	void	PCall(int narg, int nret);
-#if __APPLE__ && __MACH__
-	void	CallCallbackOnThread(int extraArgs);
-#endif
 	void	DoError(const char* msg, const char* error);
 
 	void	CallKeyHandler(const char* hname, int key, bool dblclk);
@@ -101,18 +74,3 @@ public:
 
 	enum { REGISTRY_KEY = 1 };
 };
-
-#if __APPLE__ && __MACH__
-typedef bool (*MacPLoadCompileFunc)(lua_State* L, lua_State* co, const char* modname);
-// Stack: [func, arg1..argN] -> [true, ...] or [false, err]. (#8)
-int mac_lightfunc_pcall(lua_State* L, int nargs);
-// Stack: [chunk, arg1..argN]. Run in coroutine; optionally service "__mac_lm"
-// yield requests via compile_fn. (#8)
-int mac_pload_coroutine_call(lua_State* L, int extraArgs, MacPLoadCompileFunc compile_fn = nullptr);
-bool mac_is_in_pload();
-void mac_set_in_pload(bool in_pload);
-bool mac_is_servicing_pload_queue();
-void mac_set_servicing_pload_queue(bool servicing);
-// luaJIT_setmode(LUAJIT_MODE_ENGINE|OFF) + flush; Lua jit.off() fallback only. (#8)
-void mac_jit_off(lua_State* L);
-#endif

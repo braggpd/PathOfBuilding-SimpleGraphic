@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <thread>
 #include <filesystem>
 #include <fmt/chrono.h>
 #include <future>
@@ -20,7 +21,6 @@
 #include <numeric>
 #include <random>
 #include <sstream>
-#include <thread>
 #include <vector>
 
 #include <imgui_impl_glfw.h>
@@ -1642,11 +1642,7 @@ void r_renderer_c::GetShaderImageSize(r_shaderHnd_c* hnd, int& width, int& heigh
 	if (hnd)
 	{
 		while (hnd->sh->tex->status < r_tex_c::SIZE_KNOWN) {
-#ifdef _WIN32
-			Sleep(1);
-#else
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
 		}
 		width = hnd->sh->tex->fileWidth;
 		height = hnd->sh->tex->fileHeight;

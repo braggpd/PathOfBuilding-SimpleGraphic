@@ -62,6 +62,7 @@ set(SIMPLEGRAPHIC_SOURCES
     "engine/system/sys_main.h"
     "engine/system/sys_opengl.h"
     "engine/system/sys_video.h"
+    "win/entry.cpp"
     "ui.h"
     "ui_api.cpp"
     "ui_console.cpp"
@@ -74,14 +75,6 @@ set(SIMPLEGRAPHIC_SOURCES
     "ui_subscript.cpp"
     "ui_subscript.h"
 )
-
-if (APPLE)
-    list(APPEND SIMPLEGRAPHIC_SOURCES "mac/entry.cpp")
-elseif (WIN32)
-    list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
-else ()
-    list(APPEND SIMPLEGRAPHIC_SOURCES "win/entry.cpp")
-endif ()
 
 set (SIMPLEGRAPHIC_PLATFORM_SOURCES)
 if (APPLE)
@@ -135,13 +128,14 @@ find_package(re2 CONFIG REQUIRED)
 find_package(sol2 CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 find_package(zstd REQUIRED)
-if(TARGET zstd::libzstd_shared)
-    set(ZSTD_TARGET zstd::libzstd_shared)
-else()
-    set(ZSTD_TARGET zstd::libzstd_static)
-endif()
 find_package(ZLIB REQUIRED)
 find_package(WebP)
+
+if (TARGET zstd::libzstd_shared)
+    set(ZSTD_LIBRARY zstd::libzstd_shared)
+else ()
+    set(ZSTD_LIBRARY zstd::libzstd_static)
+endif ()
 
 add_library(cmp_core STATIC
     dep/compressonator/cmp_core/source/cmp_core.cpp
@@ -229,12 +223,10 @@ endif ()
 if (APPLE)
     find_library(CORE_FOUNDATION_LIBRARY CoreFoundation)
     find_library(APPLICATION_SERVICES_LIBRARY ApplicationServices)
-    find_library(FOUNDATION_FRAMEWORK Foundation)
     target_link_libraries(SimpleGraphic
         PRIVATE
         ${CORE_FOUNDATION_LIBRARY}
         ${APPLICATION_SERVICES_LIBRARY}
-        ${FOUNDATION_FRAMEWORK}
     )
 endif ()
 
@@ -254,10 +246,13 @@ target_link_libraries(SimpleGraphic
     Threads::Threads
     WebP::webpdecoder
     ZLIB::ZLIB
-    ${ZSTD_TARGET}
+    ${ZSTD_LIBRARY}
 )
 
 if (APPLE)
+    # Native launcher executable. Upstream defers packaging to a separate
+    # launcher repo; this gives us a runnable binary alongside the dylib,
+    # mirroring "Path of Building-PoE2.exe" + "SimpleGraphic.dll" on Windows.
     set(PoB_HOST_TARGET pob-host)
     add_executable(${PoB_HOST_TARGET} mac/host.cpp)
     set_target_properties(${PoB_HOST_TARGET} PROPERTIES
@@ -309,6 +304,35 @@ if (WIN32)
 endif ()
 
 
+find_package(Git QUIET)
+if (NOT GIT_EXECUTABLE)
+    set(GIT_EXECUTABLE git)
+endif ()
+
+function(apply_submodule_patch SUBMODULE_DIR PATCH_FILE)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -C ${SUBMODULE_DIR} apply --ignore-whitespace --reverse --check ${PATCH_FILE}
+        RESULT_VARIABLE _patch_in_place
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if (NOT _patch_in_place EQUAL 0)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} -C ${SUBMODULE_DIR} apply --ignore-whitespace ${PATCH_FILE}
+            RESULT_VARIABLE _patch_result
+        )
+        if (NOT _patch_result EQUAL 0)
+            message(FATAL_ERROR "Failed to apply ${PATCH_FILE}")
+        endif ()
+        message(STATUS "Applied patch: ${PATCH_FILE}")
+    endif ()
+endfunction()
+
+apply_submodule_patch(
+    ${CMAKE_CURRENT_SOURCE_DIR}/libs/Lua-cURLv3
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/Lua-cURLv3-skip-luaL_setfuncs-on-luajit.patch
+)
+
+
 # lcurl module
 
 set(LCURL_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/Lua-cURLv3)
@@ -323,13 +347,8 @@ target_include_directories(lcurl
 target_link_libraries(lcurl
     PRIVATE
     CURL::libcurl
-    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
+    LuaJIT::LuaJIT
 )
-
-if(APPLE)
-    target_include_directories(lcurl PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_options(lcurl PRIVATE -undefined dynamic_lookup)
-endif()
 
 install(TARGETS lcurl RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:lcurl> DESTINATION ".")
@@ -338,14 +357,12 @@ install(FILES $<TARGET_RUNTIME_DLLS:lcurl> DESTINATION ".")
 
 add_library(lua-utf8 SHARED libs/luautf8/lutf8lib.c)
 
-target_compile_definitions(lua-utf8
-    PRIVATE
-    $<$<BOOL:${WIN32}>:LUA_BUILD_AS_DLL>
-)
-
-if(NOT WIN32)
-    target_compile_options(lua-utf8 PRIVATE -include limits.h)
-endif()
+if (WIN32)
+    target_compile_definitions(lua-utf8
+        PRIVATE
+        LUA_BUILD_AS_DLL
+    )
+endif ()
 
 target_include_directories(lua-utf8
     PRIVATE
@@ -353,26 +370,13 @@ target_include_directories(lua-utf8
 
 target_link_libraries(lua-utf8
     PRIVATE
-    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
+    LuaJIT::LuaJIT
 )
-
-if(APPLE)
-    target_include_directories(lua-utf8 PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_options(lua-utf8 PRIVATE -undefined dynamic_lookup)
-endif()
 
 install(TARGETS lua-utf8 RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:lua-utf8> DESTINATION ".")
 
 # luasocket module
-
-if(WIN32)
-    set(LUASOCKET_PLATFORM_SRC "libs/luasocket/src/wsocket.c")
-    set(LUASOCKET_PLATFORM_LIBS wsock32 ws2_32)
-else()
-    set(LUASOCKET_PLATFORM_SRC "libs/luasocket/src/usocket.c")
-    set(LUASOCKET_PLATFORM_LIBS "")
-endif()
 
 add_library(luasocket SHARED
    "libs/luasocket/src/auxiliar.c"
@@ -387,8 +391,13 @@ add_library(luasocket SHARED
    "libs/luasocket/src/tcp.c"
    "libs/luasocket/src/timeout.c"
    "libs/luasocket/src/udp.c"
-   ${LUASOCKET_PLATFORM_SRC}
 )
+
+if (WIN32)
+    target_sources(luasocket PRIVATE "libs/luasocket/src/wsocket.c")
+else ()
+    target_sources(luasocket PRIVATE "libs/luasocket/src/usocket.c")
+endif ()
 
 target_include_directories(luasocket
     PRIVATE
@@ -397,16 +406,14 @@ target_include_directories(luasocket
 
 target_link_libraries(luasocket
     PRIVATE
-    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
-    ${LUASOCKET_PLATFORM_LIBS}
+    LuaJIT::LuaJIT
 )
 
-if(APPLE)
-    target_include_directories(luasocket PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_options(luasocket PRIVATE -undefined dynamic_lookup)
-endif()
+if (WIN32)
+    target_link_libraries(luasocket PRIVATE wsock32 ws2_32)
+endif ()
 
-set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" )
+set_target_properties( luasocket PROPERTIES OUTPUT_NAME "socket" ) 
 install(TARGETS luasocket RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:luasocket> DESTINATION ".")
 
@@ -420,14 +427,9 @@ target_include_directories(lzip
 
 target_link_libraries(lzip
     PRIVATE
-    $<$<NOT:$<BOOL:${APPLE}>>:LuaJIT::LuaJIT>
+    LuaJIT::LuaJIT
     ZLIB::ZLIB
 )
-
-if(APPLE)
-    target_include_directories(lzip PRIVATE $<TARGET_PROPERTY:LuaJIT::LuaJIT,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_options(lzip PRIVATE -undefined dynamic_lookup)
-endif()
 
 install(TARGETS lzip RUNTIME DESTINATION ".")
 install(FILES $<TARGET_RUNTIME_DLLS:lzip> DESTINATION ".")
